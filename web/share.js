@@ -1,6 +1,6 @@
 /**
- * 健身記錄 PWA 分享圖片模組（v3：1080×1080 正方形，自動緊湊與多頁分頁）
- * 負責依 planSharePages 回傳的座標使用 Canvas 2D 繪製當日訓練分享圖，
+ * 健身記錄 PWA 分享圖片模組（v4：9:16 手機直式 1080×1920，單欄縮放排版與多頁分頁）
+ * 負責依 planSharePages 回傳的座標與縮放係數使用 Canvas 2D 繪製當日訓練分享圖，
  * 並於全螢幕面板顯示多頁橫向滑動預覽、系統分享與逐張下載。
  * 注意：本模組在載入階段不接觸 DOM，僅在函式呼叫時使用瀏覽器 API，確保可在無 DOM 環境匯入測試。
  */
@@ -8,10 +8,13 @@
 import {
   summarizeDay,
   formatNumber,
-  formatSet,
   formatDateLabel,
   SHARE_METRICS,
+  activeFields,
+  cardUnitHeader,
   compactSetText,
+  formatSetLabeled,
+  setsPerRowFor,
   planSharePages,
 } from './logic.js';
 
@@ -39,9 +42,6 @@ const COLORS = Object.freeze({
   textFaint: 'rgba(255, 255, 255, 0.45)',
 });
 
-/** 重量單位集合（用於 normal 模式計算單組訓練量小計） */
-const WEIGHT_UNITS = new Set(['kg', 'lb']);
-
 /** 逐張下載之間的間隔毫秒數 */
 const DOWNLOAD_INTERVAL_MS = 300;
 
@@ -56,6 +56,16 @@ let lastPreviewObjectUrls = [];
  */
 function makeFont(size, weight = 400) {
   return `${weight} ${size}px ${FONT_FAMILY}`;
+}
+
+/**
+ * 依頁面縮放係數計算字級（保留 1 位小數）
+ * @param {number} basePx 基準字級（px）
+ * @param {number} scale 頁面縮放係數
+ * @returns {number}
+ */
+function scaleFont(basePx, scale) {
+  return Math.round(basePx * scale * 10) / 10;
 }
 
 /**
@@ -280,7 +290,7 @@ function parseDateParts(dateStr) {
 }
 
 /**
- * 計算單組小計文字（有重量欄位且記錄次數時，回傳如 '480 kg'）
+ * 計算單組小計文字（僅在記錄次數且 kg 欄位有數值時回傳，例如 '480 kg'）
  * @param {object} set
  * @param {Array<{ key: string, unit?: string }>} fields
  * @param {boolean} trackReps
@@ -292,36 +302,21 @@ function formatSetSubtotal(set, fields, trackReps) {
   if (reps === null) return '';
 
   const fieldList = Array.isArray(fields) ? fields : [];
-  const weightField = fieldList.find((f) =>
-    WEIGHT_UNITS.has(String(f?.unit ?? '').trim().toLowerCase())
-  );
-  if (!weightField || !weightField.key) return '';
-
   const values = set.values && typeof set.values === 'object' ? set.values : {};
-  const weight = toPositiveNumber(values[weightField.key]);
+  const kgField = fieldList.find(
+    (f) =>
+      f &&
+      f.key &&
+      String(f.unit ?? '').trim().toLowerCase() === 'kg' &&
+      toPositiveNumber(values[f.key]) !== null
+  );
+  if (!kgField) return '';
+
+  const weight = toPositiveNumber(values[kgField.key]);
   if (weight === null) return '';
 
   const subtotal = Math.round(weight * reps * 10) / 10;
-  const unit = String(weightField.unit ?? '').trim();
-  return `${formatNumber(subtotal)} ${unit}`;
-}
-
-/**
- * 取得 compact 模式單一欄位器材的標題單位提示（如「kg × 下」）
- * @param {Array<{ name?: string, unit?: string }>} fields
- * @param {boolean} trackReps
- * @returns {string}
- */
-function buildCompactUnitHint(fields, trackReps) {
-  if (!Array.isArray(fields) || fields.length !== 1) return '';
-  const unit = String(fields[0]?.unit ?? '').trim();
-  const name = String(fields[0]?.name ?? '').trim();
-  const label = unit || name;
-
-  if (trackReps) {
-    return label ? `${label} × 下` : '下';
-  }
-  return label;
+  return `${formatNumber(subtotal)} kg`;
 }
 
 /**
@@ -364,16 +359,16 @@ function drawBackground(ctx, width, height) {
   if (typeof ctx.createRadialGradient === 'function') {
     const glow = ctx.createRadialGradient(
       width * 0.88,
-      100,
+      140,
       20,
       width * 0.88,
-      100,
-      440
+      140,
+      520
     );
     glow.addColorStop(0, COLORS.accentGlow);
     glow.addColorStop(1, 'rgba(34, 197, 94, 0)');
     ctx.fillStyle = glow;
-    ctx.fillRect(0, 0, width, Math.min(height, 600));
+    ctx.fillRect(0, 0, width, Math.min(height, 760));
   }
 
   // 頂部細強調光條
@@ -386,11 +381,11 @@ function drawBackground(ctx, width, height) {
   } else {
     ctx.fillStyle = COLORS.accent;
   }
-  ctx.fillRect(0, 0, width, 6);
+  ctx.fillRect(0, 0, width, 8);
 }
 
 /**
- * 繪製右上角分頁膠囊（例如「1/2」），回傳膠囊寬度
+ * 繪製右上角分頁膠囊（例如「1/2」，字級 30px），回傳膠囊寬度
  * @param {CanvasRenderingContext2D} ctx
  * @param {number} pageNo 目前頁碼
  * @param {number} total 總頁數
@@ -400,11 +395,11 @@ function drawBackground(ctx, width, height) {
  */
 function drawPageBadge(ctx, pageNo, total, rightX, y) {
   const label = `${pageNo}/${total}`;
-  const pillH = 38;
-  const padX = 18;
-  ctx.font = makeFont(22, 700);
+  const pillH = 48;
+  const padX = 22;
+  ctx.font = makeFont(30, 700);
   const textW = measureWidth(ctx, label);
-  const pillW = Math.max(66, Math.ceil(textW + padX * 2));
+  const pillW = Math.max(84, Math.ceil(textW + padX * 2));
   const pillX = rightX - pillW;
 
   drawRoundedRect(
@@ -419,17 +414,17 @@ function drawPageBadge(ctx, pageNo, total, rightX, y) {
     1.5
   );
 
-  ctx.font = makeFont(22, 700);
+  ctx.font = makeFont(30, 700);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = COLORS.accentText;
-  ctx.fillText(label, pillX + pillW / 2, y + pillH / 2 + 1);
+  ctx.fillText(label, pillX + pillW / 2, y + pillH / 2);
 
   return pillW;
 }
 
 /**
- * 繪製訓練部位圓角標籤列（自動換行，對齊 SHARE_METRICS.tagRowH）
+ * 繪製訓練部位圓角標籤列（字級 30px，自動換行並對齊 SHARE_METRICS.tagRowH）
  * @param {CanvasRenderingContext2D} ctx
  * @param {string[]} bodyParts
  * @param {number} x
@@ -444,12 +439,13 @@ function drawBodyPartTags(ctx, bodyParts, x, y, maxWidth, maxBottomY, metrics) {
     : [];
   if (parts.length === 0) return;
 
-  const fontSize = 25;
-  const padX = 20;
-  const tagH = 40;
+  const fontSize = 30;
+  const padX = 24;
+  const tagH = 50;
   const tagRadius = tagH / 2;
   const gapX = metrics.tagGap;
   const rowPitch = metrics.tagRowH;
+  const rowOffsetY = Math.max(0, (rowPitch - tagH) / 2);
 
   ctx.font = makeFont(fontSize, 600);
   ctx.textAlign = 'left';
@@ -467,8 +463,10 @@ function drawBodyPartTags(ctx, bodyParts, x, y, maxWidth, maxBottomY, metrics) {
       curY += rowPitch;
     }
 
+    const pillY = curY + rowOffsetY;
+
     // 安全防呆：不超出摘要卡上緣
-    if (curY + tagH > maxBottomY + 4) {
+    if (pillY + tagH > maxBottomY + 4) {
       break;
     }
 
@@ -476,7 +474,7 @@ function drawBodyPartTags(ctx, bodyParts, x, y, maxWidth, maxBottomY, metrics) {
     drawRoundedRect(
       ctx,
       curX,
-      curY,
+      pillY,
       tagW,
       tagH,
       tagRadius,
@@ -485,14 +483,14 @@ function drawBodyPartTags(ctx, bodyParts, x, y, maxWidth, maxBottomY, metrics) {
       1.5
     );
     ctx.fillStyle = COLORS.accentText;
-    ctx.fillText(displayPart, curX + padX, curY + tagH / 2 + 1);
+    ctx.fillText(displayPart, curX + padX, pillY + tagH / 2);
 
     curX += tagW + gapX;
   }
 }
 
 /**
- * 在總結數據格內繪製數值與單位（過寬時自動縮小字級避免溢出）
+ * 在總結數據格內繪製數值（基準 56px）與單位（過寬時自動縮小字級避免溢出）
  * @param {CanvasRenderingContext2D} ctx
  * @param {string} valueText
  * @param {string} unitText
@@ -503,26 +501,25 @@ function drawBodyPartTags(ctx, bodyParts, x, y, maxWidth, maxBottomY, metrics) {
  * @param {string} unitColor
  */
 function drawMetricValue(ctx, valueText, unitText, x, baselineY, maxWidth, valueColor, unitColor) {
-  let valueSize = 40;
-  const unitSize = 22;
+  let valueSize = 56;
+  const unitSize = 26;
   const unitGap = 6;
 
-  // 若數值過長，依格子可用寬度微調字級避免溢出
+  // 單位寬度必須以單位字型量測，否則會高估而把數值誤縮或誤截成「…」
+  ctx.font = makeFont(unitSize, 600);
+  const unitWidth = measureWidth(ctx, unitText);
+
+  // 若數值加上單位過長，依格子可用寬度逐步縮小字級避免溢出
   while (valueSize > 24) {
     ctx.font = makeFont(valueSize, 800);
     const valW = measureWidth(ctx, valueText);
-    ctx.font = makeFont(unitSize, 600);
-    const unitW = measureWidth(ctx, unitText);
-    if (valW + unitGap + unitW <= maxWidth) break;
+    if (valW + unitGap + unitWidth <= maxWidth) break;
     valueSize -= 2;
   }
 
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
 
-  // 單位寬度要用單位字型量測，否則會高估而把數值誤截成「…」
-  ctx.font = makeFont(unitSize, 600);
-  const unitWidth = measureWidth(ctx, unitText);
   ctx.font = makeFont(valueSize, 800);
   const safeValue = truncateText(
     ctx,
@@ -539,7 +536,7 @@ function drawMetricValue(ctx, valueText, unitText, x, baselineY, maxWidth, value
 }
 
 /**
- * 繪製第 1 張的 4 格一列總結數據卡片（含選填有氧加總列）
+ * 繪製第 1 張的 4 格一列總結數據卡片（數值 56px／標籤 30px，含選填有氧加總列）
  * @param {CanvasRenderingContext2D} ctx
  * @param {object} summary
  * @param {number} x
@@ -554,15 +551,15 @@ function drawSummaryCard(ctx, summary, x, y, w, h, metrics) {
   const cardioText = formatCardioSummary(summary?.cardio);
   const hasCardio = Boolean(cardioText);
 
-  drawRoundedRect(ctx, x, y, w, h, 22, COLORS.cardBg, COLORS.cardBorder, 1.5);
+  drawRoundedRect(ctx, x, y, w, h, 24, COLORS.cardBg, COLORS.cardBorder, 1.5);
 
   const colW = w / 4;
-  const cellPadX = 20;
+  const cellPadX = 18;
 
   // 四格垂直細分隔線
   for (let i = 1; i < 4; i++) {
     const divX = x + colW * i;
-    drawVerticalLine(ctx, divX, y + 20, y + statsH - 20, COLORS.divider);
+    drawVerticalLine(ctx, divX, y + 22, y + statsH - 22, COLORS.divider);
   }
 
   const statItems = [
@@ -597,11 +594,11 @@ function drawSummaryCard(ctx, summary, x, y, w, h, metrics) {
     const cellX = x + colW * i + cellPadX;
     const maxCellW = colW - cellPadX * 2;
 
-    ctx.font = makeFont(22, 500);
+    ctx.font = makeFont(30, 500);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle = COLORS.textMuted;
-    ctx.fillText(item.label, cellX, y + 20);
+    ctx.fillText(truncateText(ctx, item.label, maxCellW), cellX, y + 22);
 
     drawMetricValue(
       ctx,
@@ -615,29 +612,29 @@ function drawSummaryCard(ctx, summary, x, y, w, h, metrics) {
     );
   }
 
-  // 有氧加總列（依 metrics.cardioH 高度單列顯示，過長時以「…」截斷）
+  // 有氧加總列（依 metrics.cardioH 高度單列垂直置中顯示，過長時以「…」截斷）
   if (hasCardio) {
     const dividerY = y + statsH;
     drawHorizontalLine(ctx, x + cellPadX, x + w - cellPadX, dividerY, COLORS.divider);
 
     const rowCy = dividerY + cardioH / 2;
     ctx.beginPath();
-    ctx.arc(x + cellPadX + 6, rowCy, 5, 0, Math.PI * 2);
+    ctx.arc(x + cellPadX + 7, rowCy, 6, 0, Math.PI * 2);
     ctx.fillStyle = COLORS.accent;
     ctx.fill();
 
-    ctx.font = makeFont(24, 600);
+    ctx.font = makeFont(30, 600);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textBody;
-    const textX = x + cellPadX + 22;
-    const maxTextW = w - cellPadX * 2 - 22;
-    ctx.fillText(truncateText(ctx, cardioText, maxTextW), textX, rowCy + 1);
+    const textX = x + cellPadX + 24;
+    const maxTextW = w - cellPadX * 2 - 24;
+    ctx.fillText(truncateText(ctx, cardioText, maxTextW), textX, rowCy);
   }
 }
 
 /**
- * 繪製第 1 張頁首（日期大字＋年份、部位標籤、總結 4 格一列＋有氧加總列，多張時右上標頁碼膠囊）
+ * 繪製第 1 張頁首（日期 104px＋年份 40px、部位標籤 30px、總結 4 格一列＋有氧加總列，多張時右上標頁碼膠囊）
  * @param {CanvasRenderingContext2D} ctx
  * @param {object} summary
  * @param {object} page planSharePages 回傳的單頁配置
@@ -645,44 +642,45 @@ function drawSummaryCard(ctx, summary, x, y, w, h, metrics) {
  */
 function drawFirstPageHeader(ctx, summary, page, metrics) {
   const pad = metrics.pad;
-  const contentW = metrics.size - pad * 2;
+  const width = metrics.width;
+  const contentW = width - pad * 2;
   const { mainLabel, yearLabel } = parseDateParts(summary?.date || '');
 
   // 1. 頂部日期區塊（範圍：pad .. pad + dateH）
   const dateTop = pad;
 
   // 左上強調色小條與「今日訓練」小字
-  drawRoundedRect(ctx, pad, dateTop + 2, 7, 24, 3.5, COLORS.accent);
-  ctx.font = makeFont(24, 700);
+  drawRoundedRect(ctx, pad, dateTop + 2, 8, 26, 4, COLORS.accent);
+  ctx.font = makeFont(26, 700);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   ctx.fillStyle = COLORS.accent;
-  ctx.fillText('今日訓練', pad + 18, dateTop);
+  ctx.fillText('今日訓練', pad + 20, dateTop);
 
   // 多張時於右上角繪製頁碼膠囊（如「1/2」）
   let rightReservedW = 0;
   if (page.total > 1) {
-    const badgeW = drawPageBadge(ctx, page.pageNo, page.total, metrics.size - pad, dateTop);
+    const badgeW = drawPageBadge(ctx, page.pageNo, page.total, width - pad, dateTop);
     rightReservedW = Math.max(rightReservedW, badgeW);
   }
 
-  // 右側年份文字
+  // 右側年份文字（40px）
   if (yearLabel) {
-    ctx.font = makeFont(32, 700);
+    ctx.font = makeFont(40, 700);
     ctx.textAlign = 'right';
     ctx.textBaseline = 'top';
     ctx.fillStyle = COLORS.textFaint;
-    ctx.fillText(yearLabel, metrics.size - pad, dateTop + 56);
+    ctx.fillText(yearLabel, width - pad, dateTop + 78);
     rightReservedW = Math.max(rightReservedW, measureWidth(ctx, yearLabel));
   }
 
-  // 主日期大字（左側）
-  ctx.font = makeFont(62, 800);
+  // 主日期大字（左側，104px）
+  ctx.font = makeFont(104, 800);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   ctx.fillStyle = COLORS.textPrimary;
-  const dateMaxW = Math.max(180, contentW - rightReservedW - 20);
-  ctx.fillText(truncateText(ctx, mainLabel, dateMaxW), pad, dateTop + 32);
+  const dateMaxW = Math.max(180, contentW - rightReservedW - 24);
+  ctx.fillText(truncateText(ctx, mainLabel, dateMaxW), pad, dateTop + 28);
 
   // 2. 總結卡片位置對齊 page.bodyTop - gap（確保與第一張器材卡完全不重疊）
   const hasCardio = Array.isArray(summary?.cardio) && summary.cardio.length > 0;
@@ -715,61 +713,63 @@ function drawFirstPageHeader(ctx, summary, page, metrics) {
  */
 function drawOtherPageHeader(ctx, summary, page, metrics) {
   const pad = metrics.pad;
-  const contentW = metrics.size - pad * 2;
+  const width = metrics.width;
+  const contentW = width - pad * 2;
   const { mainLabel, yearLabel } = parseDateParts(summary?.date || '');
 
   // 右上角頁碼膠囊（如「2/3」）
   let badgeW = 0;
   if (page.total > 1) {
-    badgeW = drawPageBadge(ctx, page.pageNo, page.total, metrics.size - pad, pad + 16);
+    badgeW = drawPageBadge(ctx, page.pageNo, page.total, width - pad, pad + 26);
   }
 
   // 左側強調條與小字標題
-  drawRoundedRect(ctx, pad, pad + 10, 7, 56, 3.5, COLORS.accent);
+  drawRoundedRect(ctx, pad, pad + 14, 8, 76, 4, COLORS.accent);
 
   const subText = yearLabel ? `今日訓練 · ${yearLabel}` : '今日訓練';
-  ctx.font = makeFont(20, 700);
+  ctx.font = makeFont(26, 700);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   ctx.fillStyle = COLORS.accent;
-  ctx.fillText(subText, pad + 18, pad + 6);
+  ctx.fillText(subText, pad + 22, pad + 10);
 
   const titleText = `${mainLabel}（續）`;
-  ctx.font = makeFont(36, 800);
+  ctx.font = makeFont(46, 800);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   ctx.fillStyle = COLORS.textPrimary;
-  const titleMaxW = Math.max(160, contentW - 18 - (badgeW ? badgeW + 20 : 0));
-  ctx.fillText(truncateText(ctx, titleText, titleMaxW), pad + 18, pad + 32);
+  const titleMaxW = Math.max(160, contentW - 22 - (badgeW ? badgeW + 20 : 0));
+  ctx.fillText(truncateText(ctx, titleText, titleMaxW), pad + 22, pad + 44);
 
   // 頁首底部分隔線
-  drawHorizontalLine(ctx, pad, metrics.size - pad, page.bodyTop - 10, COLORS.divider);
+  drawHorizontalLine(ctx, pad, width - pad, page.bodyTop - 12, COLORS.divider);
 }
 
 /**
- * 繪製底部置中「健身記錄」浮水印
+ * 繪製固定於畫布底部的置中「健身記錄」浮水印（字級 30px）
  * @param {CanvasRenderingContext2D} ctx
  * @param {typeof SHARE_METRICS} metrics
  */
 function drawFooter(ctx, metrics) {
-  const size = metrics.size;
-  const footerTop = size - metrics.pad - metrics.footerH;
+  const width = metrics.width;
+  const height = metrics.height;
+  const footerTop = height - metrics.pad - metrics.footerH;
 
   drawRoundedRect(
     ctx,
-    size / 2 - 20,
+    width / 2 - 24,
     footerTop + 12,
-    40,
-    4,
-    2,
+    48,
+    5,
+    2.5,
     'rgba(34, 197, 94, 0.55)'
   );
 
-  ctx.font = makeFont(24, 600);
+  ctx.font = makeFont(30, 600);
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
+  ctx.textBaseline = 'middle';
   ctx.fillStyle = COLORS.textFaint;
-  ctx.fillText('健身記錄', size / 2, footerTop + 26);
+  ctx.fillText('健身記錄', width / 2, footerTop + 22 + (metrics.footerH - 22) / 2);
 }
 
 /**
@@ -787,27 +787,47 @@ function resolveShownSetCount(totalSets, card) {
 }
 
 /**
- * 繪製 normal 模式單欄器材卡片（完全依 card.x / y / w / h 與 SHARE_METRICS.normal 繪製）
- * 字級：器材名 40px、組數 32px、備註 26px（≥ 24px）
+ * 計算卡片內備註實際可用的最大行數（對齊 planSharePages 分配的高度避免裁切）
+ * @param {number} cardBottomY 卡片內容下緣 Y（card.y + card.h - padY）
+ * @param {number} cursorY 備註起始 Y
+ * @param {number} noteLineH 縮放後的備註列高
+ * @param {number} maxLines 模式允許的備註最大行數
+ * @returns {number}
+ */
+function resolveAvailableNoteLines(cardBottomY, cursorY, noteLineH, maxLines) {
+  if (maxLines <= 1 || noteLineH <= 0) return Math.max(0, maxLines);
+  const remainingH = Math.max(0, cardBottomY - cursorY);
+  const fitted = Math.round(remainingH / noteLineH);
+  return Math.max(1, Math.min(maxLines, fitted));
+}
+
+/**
+ * 繪製 normal 模式單欄器材卡片（完全依 card.x / y / w / h 與 page.scale 繪製）
+ * 基準字級（再乘 scale）：器材名 52px、組數 42px、備註 32px
  * @param {CanvasRenderingContext2D} ctx
  * @param {object} log 訓練紀錄
  * @param {object} card 卡片配置座標
  * @param {typeof SHARE_METRICS.normal} m normal 版面參數
+ * @param {number} scale 頁面縮放係數
  */
-function drawNormalCard(ctx, log, card, m) {
-  const padX = 26;
+function drawNormalCard(ctx, log, card, m, scale) {
+  const padX = 32;
   const innerW = Math.max(80, card.w - padX * 2);
   const cardRight = card.x + card.w - padX;
-  let cursorY = card.y + m.padY;
+  const padY = m.padY * scale;
+  const titleH = m.titleH * scale;
+  const rowH = m.rowH * scale;
+  const noteLineH = m.noteLineH * scale;
+  let cursorY = card.y + padY;
 
   const sets = Array.isArray(log?.sets) ? log.sets : [];
-  const fields = Array.isArray(log?.fields) ? log.fields : [];
+  const usedFields = activeFields(log);
   const trackReps = log?.trackReps !== false;
   const noteText = typeof log?.note === 'string' ? log.note.trim() : '';
 
-  // 1. 標題列（序號圓圈＋器材名 40px＋右側部位小字）
-  const titleCy = cursorY + m.titleH / 2;
-  const circleRadius = 20;
+  // 1. 標題列（序號圓圈＋器材名 52px×scale＋右側單位標頭 cardUnitHeader）
+  const titleCy = cursorY + titleH / 2;
+  const circleRadius = Math.round(24 * scale);
   const circleCx = card.x + padX + circleRadius;
 
   ctx.beginPath();
@@ -815,134 +835,157 @@ function drawNormalCard(ctx, log, card, m) {
   ctx.fillStyle = COLORS.accent;
   ctx.fill();
 
-  ctx.font = makeFont(24, 800);
+  ctx.font = makeFont(scaleFont(28, scale), 800);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = COLORS.accentDarkText;
-  ctx.fillText(String((card.logIndex ?? 0) + 1), circleCx, titleCy + 1);
+  ctx.fillText(String((card.logIndex ?? 0) + 1), circleCx, titleCy);
 
-  // 右側部位文字
-  const bodyParts = Array.isArray(log?.bodyParts)
-    ? log.bodyParts.map((p) => String(p ?? '').trim()).filter(Boolean)
-    : [];
-  const partsRaw = bodyParts.join(' · ');
-  let partsW = 0;
-  if (partsRaw) {
-    ctx.font = makeFont(24, 500);
-    const partsText = truncateText(ctx, partsRaw, Math.min(240, innerW * 0.28));
-    partsW = measureWidth(ctx, partsText);
+  // 右側單位標頭（空字串則不繪製）
+  const unitHeaderRaw = String(cardUnitHeader(log) ?? '').trim();
+  let unitHeaderW = 0;
+  if (unitHeaderRaw) {
+    ctx.font = makeFont(scaleFont(30, scale), 500);
+    const unitHeaderText = truncateText(
+      ctx,
+      unitHeaderRaw,
+      Math.min(280 * scale, innerW * 0.35)
+    );
+    unitHeaderW = measureWidth(ctx, unitHeaderText);
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textMuted;
-    ctx.fillText(partsText, cardRight, titleCy + 1);
+    ctx.fillText(unitHeaderText, cardRight, titleCy);
   }
 
-  // 器材名稱（40px）
-  const nameX = card.x + padX + circleRadius * 2 + 16;
-  const nameMaxW = Math.max(80, cardRight - (partsW ? partsW + 16 : 0) - nameX);
+  // 器材名稱（基準 52px × scale）
+  const nameX = card.x + padX + circleRadius * 2 + Math.round(18 * scale);
+  const nameMaxW = Math.max(80, cardRight - (unitHeaderW ? unitHeaderW + 18 : 0) - nameX);
   const equipName = String(log?.equipmentName || '未命名器材').trim();
-  ctx.font = makeFont(40, 700);
+  ctx.font = makeFont(scaleFont(52, scale), 700);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = COLORS.textPrimary;
-  ctx.fillText(truncateText(ctx, equipName, nameMaxW), nameX, titleCy + 1);
+  ctx.fillText(truncateText(ctx, equipName, nameMaxW), nameX, titleCy);
 
-  cursorY += m.titleH;
+  cursorY += titleH;
 
   if (sets.length > 0 || noteText) {
-    drawHorizontalLine(ctx, card.x + padX, cardRight, cursorY - 2, COLORS.divider);
+    drawHorizontalLine(ctx, card.x + padX, cardRight, cursorY - 1, COLORS.divider);
   }
 
-  // 2. 各組明細（組次＋formatSet 完整文字 32px＋右側單組小計）
+  // 2. 各組明細（組次＋formatSetLabeled 42px×scale＋右側 kg 單組小計）
   const shownCount = resolveShownSetCount(sets.length, card);
-  const setLabelColW = 114;
+  const setLabelFontSize = scaleFont(34, scale);
+  const setContentFontSize = scaleFont(42, scale);
+  const subtotalFontSize = scaleFont(32, scale);
+
+  // 依最大組次動態計算組次欄寬，確保放大時不與組數文字重疊
+  let setLabelColW = Math.round(136 * scale);
+  if (shownCount > 0) {
+    ctx.font = makeFont(setLabelFontSize, 600);
+    const maxLabelW = measureWidth(ctx, `第 ${shownCount} 組`);
+    setLabelColW = Math.max(setLabelColW, Math.ceil(maxLabelW + 20 * scale));
+  }
 
   for (let i = 0; i < shownCount; i++) {
     const set = sets[i];
-    const rowCy = cursorY + m.rowH / 2;
+    const rowCy = cursorY + rowH / 2;
 
     // 組次標籤
-    ctx.font = makeFont(28, 600);
+    ctx.font = makeFont(setLabelFontSize, 600);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textMuted;
-    ctx.fillText(`第 ${i + 1} 組`, card.x + padX, rowCy + 1);
+    ctx.fillText(`第 ${i + 1} 組`, card.x + padX, rowCy);
 
-    // 右側單組小計
-    const subtotal = formatSetSubtotal(set, fields, trackReps);
+    // 右側單組小計（僅 kg 欄位有值時才繪製）
+    const subtotalRaw = formatSetSubtotal(set, usedFields, trackReps);
     let subtotalW = 0;
-    if (subtotal) {
-      ctx.font = makeFont(26, 500);
+    if (subtotalRaw) {
+      ctx.font = makeFont(subtotalFontSize, 500);
+      const subtotal = truncateText(ctx, subtotalRaw, innerW * 0.3);
       subtotalW = measureWidth(ctx, subtotal);
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = COLORS.accentSubtle;
-      ctx.fillText(subtotal, cardRight, rowCy + 1);
+      ctx.fillText(subtotal, cardRight, rowCy);
     }
 
-    // 組數內容（32px）
-    const setText = formatSet(set, fields, trackReps) || '—';
+    // 組數內容（基準 42px × scale）
+    const setText = formatSetLabeled(set, usedFields, trackReps) || '—';
     const contentX = card.x + padX + setLabelColW;
     const contentMaxW = Math.max(
       80,
       cardRight - (subtotalW ? subtotalW + 18 : 0) - contentX
     );
-    ctx.font = makeFont(32, 600);
+    ctx.font = makeFont(setContentFontSize, 600);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textBody;
-    ctx.fillText(truncateText(ctx, setText, contentMaxW), contentX, rowCy + 1);
+    ctx.fillText(truncateText(ctx, setText, contentMaxW), contentX, rowCy);
 
-    cursorY += m.rowH;
+    cursorY += rowH;
   }
 
   // 若有截斷組數，保留一列顯示「…另 N 組」
   if (card.hiddenSets > 0) {
-    const rowCy = cursorY + m.rowH / 2;
-    ctx.font = makeFont(28, 600);
+    const rowCy = cursorY + rowH / 2;
+    ctx.font = makeFont(scaleFont(36, scale), 600);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textMuted;
-    ctx.fillText(truncateText(ctx, `…另 ${card.hiddenSets} 組`, innerW), card.x + padX, rowCy + 1);
-    cursorY += m.rowH;
+    ctx.fillText(truncateText(ctx, `…另 ${card.hiddenSets} 組`, innerW), card.x + padX, rowCy);
+    cursorY += rowH;
   }
 
-  // 3. 備註（最多 noteMaxLines 列，超出以「…」截斷）
+  // 3. 備註（基準 32px × scale，超出可用行數以「…」截斷）
   if (noteText) {
-    ctx.font = makeFont(26, 400);
-    const noteLines = wrapTextClamped(ctx, `備註：${noteText}`, innerW, m.noteMaxLines);
+    ctx.font = makeFont(scaleFont(32, scale), 400);
+    const maxLines = resolveAvailableNoteLines(
+      card.y + card.h - padY,
+      cursorY,
+      noteLineH,
+      m.noteMaxLines
+    );
+    const noteLines = wrapTextClamped(ctx, `備註：${noteText}`, innerW, maxLines);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textMuted;
     for (let i = 0; i < noteLines.length; i++) {
-      const lineCy = cursorY + i * m.noteLineH + m.noteLineH / 2;
+      const lineCy = cursorY + i * noteLineH + noteLineH / 2;
       ctx.fillText(noteLines[i], card.x + padX, lineCy);
     }
   }
 }
 
 /**
- * 繪製 compact 模式兩欄器材卡片（完全依 card.x / y / w / h 與 SHARE_METRICS.compact 繪製）
- * 字級下限：器材名 32px、組數文字 26px、備註 24px
+ * 繪製 compact 模式單欄器材卡片（完全依 card.x / y / w / h、card.setsPerRow 與 page.scale 繪製）
+ * 基準字級（再乘 scale）：器材名 44px、組數 36px、備註 30px
  * @param {CanvasRenderingContext2D} ctx
  * @param {object} log 訓練紀錄
  * @param {object} card 卡片配置座標
  * @param {typeof SHARE_METRICS.compact} m compact 版面參數
+ * @param {number} scale 頁面縮放係數
  */
-function drawCompactCard(ctx, log, card, m) {
-  const padX = 18;
+function drawCompactCard(ctx, log, card, m, scale) {
+  const padX = 28;
   const innerW = Math.max(80, card.w - padX * 2);
   const cardRight = card.x + card.w - padX;
-  let cursorY = card.y + m.padY;
+  const padY = m.padY * scale;
+  const titleH = m.titleH * scale;
+  const rowH = m.rowH * scale;
+  const noteLineH = m.noteLineH * scale;
+  let cursorY = card.y + padY;
 
   const sets = Array.isArray(log?.sets) ? log.sets : [];
-  const fields = Array.isArray(log?.fields) ? log.fields : [];
+  const usedFields = activeFields(log);
   const trackReps = log?.trackReps !== false;
   const noteText = typeof log?.note === 'string' ? log.note.trim() : '';
 
-  // 1. 標題列（序號圓圈＋器材名 32px＋單一欄位單位提示如「kg × 下」）
-  const titleCy = cursorY + m.titleH / 2;
-  const circleRadius = 15;
+  // 1. 標題列（序號圓圈＋器材名 44px×scale＋右側單位標頭 cardUnitHeader）
+  const titleCy = cursorY + titleH / 2;
+  const circleRadius = Math.round(20 * scale);
   const circleCx = card.x + padX + circleRadius;
 
   ctx.beginPath();
@@ -950,50 +993,59 @@ function drawCompactCard(ctx, log, card, m) {
   ctx.fillStyle = COLORS.accent;
   ctx.fill();
 
-  ctx.font = makeFont(19, 800);
+  ctx.font = makeFont(scaleFont(24, scale), 800);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = COLORS.accentDarkText;
-  ctx.fillText(String((card.logIndex ?? 0) + 1), circleCx, titleCy + 1);
+  ctx.fillText(String((card.logIndex ?? 0) + 1), circleCx, titleCy);
 
-  // fields 只有 1 個時在標題右側標示單位提示（如「kg × 下」）
-  const unitHintRaw = buildCompactUnitHint(fields, trackReps);
-  let unitHintW = 0;
-  if (unitHintRaw) {
-    ctx.font = makeFont(20, 500);
-    const unitHint = truncateText(ctx, unitHintRaw, 116);
-    unitHintW = measureWidth(ctx, unitHint);
+  // 右側單位標頭（空字串則不繪製）
+  const unitHeaderRaw = String(cardUnitHeader(log) ?? '').trim();
+  let unitHeaderW = 0;
+  if (unitHeaderRaw) {
+    ctx.font = makeFont(scaleFont(28, scale), 500);
+    const unitHeaderText = truncateText(
+      ctx,
+      unitHeaderRaw,
+      Math.min(260 * scale, innerW * 0.35)
+    );
+    unitHeaderW = measureWidth(ctx, unitHeaderText);
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textMuted;
-    ctx.fillText(unitHint, cardRight, titleCy + 1);
+    ctx.fillText(unitHeaderText, cardRight, titleCy);
   }
 
-  // 器材名稱（32px）
-  const nameX = card.x + padX + circleRadius * 2 + 10;
-  const nameMaxW = Math.max(60, cardRight - (unitHintW ? unitHintW + 10 : 0) - nameX);
+  // 器材名稱（基準 44px × scale）
+  const nameX = card.x + padX + circleRadius * 2 + Math.round(16 * scale);
+  const nameMaxW = Math.max(80, cardRight - (unitHeaderW ? unitHeaderW + 16 : 0) - nameX);
   const equipName = String(log?.equipmentName || '未命名器材').trim();
-  ctx.font = makeFont(32, 700);
+  ctx.font = makeFont(scaleFont(44, scale), 700);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = COLORS.textPrimary;
-  ctx.fillText(truncateText(ctx, equipName, nameMaxW), nameX, titleCy + 1);
+  ctx.fillText(truncateText(ctx, equipName, nameMaxW), nameX, titleCy);
 
-  cursorY += m.titleH;
+  cursorY += titleH;
 
   if (sets.length > 0 || noteText) {
-    drawHorizontalLine(ctx, card.x + padX, cardRight, cursorY - 2, COLORS.divider);
+    drawHorizontalLine(ctx, card.x + padX, cardRight, cursorY - 1, COLORS.divider);
   }
 
-  // 2. 組數列：fields.length <= 1 時每列 2 組，否則每列 1 組（文字 26px）
+  // 2. 組數列：依 card.setsPerRow 每列平均分欄，前綴「1.」組次（組數文字 36px × scale）
   const shownCount = resolveShownSetCount(sets.length, card);
-  const perRow = fields.length <= 1 ? (m.setsPerRow || 2) : 1;
-  const colGap = 12;
+  const perRow = Math.max(
+    1,
+    Number(card?.setsPerRow) || setsPerRowFor(log, 'compact') || 1
+  );
+  const colGap = 16;
   const cellW = perRow > 1 ? (innerW - colGap * (perRow - 1)) / perRow : innerW;
   const rowCount = Math.ceil(shownCount / perRow);
+  const indexFontSize = scaleFont(32, scale);
+  const setFontSize = scaleFont(36, scale);
 
   for (let r = 0; r < rowCount; r++) {
-    const rowCy = cursorY + m.rowH / 2;
+    const rowCy = cursorY + rowH / 2;
     for (let c = 0; c < perRow; c++) {
       const idx = r * perRow + c;
       if (idx >= shownCount) break;
@@ -1001,60 +1053,67 @@ function drawCompactCard(ctx, log, card, m) {
       const cellX = card.x + padX + c * (cellW + colGap);
       const indexText = `${idx + 1}.`;
 
-      ctx.font = makeFont(26, 500);
+      ctx.font = makeFont(indexFontSize, 500);
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = COLORS.textMuted;
-      ctx.fillText(indexText, cellX, rowCy + 1);
-      const prefixW = measureWidth(ctx, indexText) + 6;
+      ctx.fillText(indexText, cellX, rowCy);
+      const prefixW = measureWidth(ctx, indexText) + Math.round(8 * scale);
 
-      const setText = compactSetText(sets[idx], fields, trackReps) || '—';
-      ctx.font = makeFont(26, 600);
+      const setText = compactSetText(sets[idx], usedFields, trackReps) || '—';
+      ctx.font = makeFont(setFontSize, 600);
       ctx.fillStyle = COLORS.textBody;
       ctx.fillText(
         truncateText(ctx, setText, Math.max(24, cellW - prefixW)),
         cellX + prefixW,
-        rowCy + 1
+        rowCy
       );
     }
-    cursorY += m.rowH;
+    cursorY += rowH;
   }
 
   // 若有截斷組數，保留一列顯示「…另 N 組」
   if (card.hiddenSets > 0) {
-    const rowCy = cursorY + m.rowH / 2;
-    ctx.font = makeFont(26, 600);
+    const rowCy = cursorY + rowH / 2;
+    ctx.font = makeFont(scaleFont(34, scale), 600);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textMuted;
-    ctx.fillText(truncateText(ctx, `…另 ${card.hiddenSets} 組`, innerW), card.x + padX, rowCy + 1);
-    cursorY += m.rowH;
+    ctx.fillText(truncateText(ctx, `…另 ${card.hiddenSets} 組`, innerW), card.x + padX, rowCy);
+    cursorY += rowH;
   }
 
-  // 3. 備註（字級 24px，最多 noteMaxLines 列，超出以「…」截斷）
+  // 3. 備註（基準 30px × scale，超出可用行數以「…」截斷）
   if (noteText) {
-    ctx.font = makeFont(24, 400);
-    const noteLines = wrapTextClamped(ctx, `備註：${noteText}`, innerW, m.noteMaxLines);
+    ctx.font = makeFont(scaleFont(30, scale), 400);
+    const maxLines = resolveAvailableNoteLines(
+      card.y + card.h - padY,
+      cursorY,
+      noteLineH,
+      m.noteMaxLines
+    );
+    const noteLines = wrapTextClamped(ctx, `備註：${noteText}`, innerW, maxLines);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textMuted;
     for (let i = 0; i < noteLines.length; i++) {
-      const lineCy = cursorY + i * m.noteLineH + m.noteLineH / 2;
+      const lineCy = cursorY + i * noteLineH + noteLineH / 2;
       ctx.fillText(noteLines[i], card.x + padX, lineCy);
     }
   }
 }
 
 /**
- * 繪製單一器材卡片外框與內容（依 planSharePages 回傳的座標與裁切邊界繪製）
+ * 繪製單一器材卡片外框與內容（依 planSharePages 回傳的單欄座標與縮放係數繪製）
  * @param {CanvasRenderingContext2D} ctx
  * @param {object} log
  * @param {object} card
  * @param {'normal' | 'compact'} mode
  * @param {typeof SHARE_METRICS} metrics
+ * @param {number} scale
  */
-function drawEquipmentCard(ctx, log, card, mode, metrics) {
-  const radius = mode === 'compact' ? 20 : 24;
+function drawEquipmentCard(ctx, log, card, mode, metrics, scale) {
+  const radius = mode === 'compact' ? 22 : 26;
   drawRoundedRect(
     ctx,
     card.x,
@@ -1079,9 +1138,9 @@ function drawEquipmentCard(ctx, log, card, mode, metrics) {
   }
 
   if (mode === 'normal') {
-    drawNormalCard(ctx, log, card, metrics.normal);
+    drawNormalCard(ctx, log, card, metrics.normal, scale);
   } else {
-    drawCompactCard(ctx, log, card, metrics.compact);
+    drawCompactCard(ctx, log, card, metrics.compact, scale);
   }
 
   if (canClip) {
@@ -1090,7 +1149,7 @@ function drawEquipmentCard(ctx, log, card, mode, metrics) {
 }
 
 /**
- * 繪製單張 1080×1080 分享圖頁面
+ * 繪製單張 9:16（1080×1920）分享圖頁面
  * @param {CanvasRenderingContext2D} ctx
  * @param {object} summary
  * @param {object} page planSharePages 回傳的單頁配置
@@ -1098,8 +1157,7 @@ function drawEquipmentCard(ctx, log, card, mode, metrics) {
  * @param {typeof SHARE_METRICS} metrics
  */
 function drawSharePage(ctx, summary, page, mode, metrics) {
-  const size = metrics.size;
-  drawBackground(ctx, size, size);
+  drawBackground(ctx, metrics.width, metrics.height);
 
   if (page.hasSummary) {
     drawFirstPageHeader(ctx, summary, page, metrics);
@@ -1107,19 +1165,21 @@ function drawSharePage(ctx, summary, page, mode, metrics) {
     drawOtherPageHeader(ctx, summary, page, metrics);
   }
 
+  const scale =
+    Number.isFinite(page?.scale) && page.scale > 0 ? page.scale : 1;
   const logs = Array.isArray(summary?.logs) ? summary.logs : [];
   const cards = Array.isArray(page.cards) ? page.cards : [];
   for (const card of cards) {
     const log = logs[card.logIndex];
     if (!log) continue;
-    drawEquipmentCard(ctx, log, card, mode, metrics);
+    drawEquipmentCard(ctx, log, card, mode, metrics, scale);
   }
 
   drawFooter(ctx, metrics);
 }
 
 /**
- * 依 planSharePages 結果繪製全部 1080×1080 正方形分享圖 Canvas 陣列
+ * 依 planSharePages 結果繪製全部 9:16 直式分享圖 Canvas 陣列
  * @param {object} daySummary 由 summarizeDay 產生的當日訓練摘要
  * @param {{ createCanvas?: (w: number, h: number) => HTMLCanvasElement }} [options={}]
  * @returns {HTMLCanvasElement[]}
@@ -1127,7 +1187,8 @@ function drawSharePage(ctx, summary, page, mode, metrics) {
 export function buildShareCanvases(daySummary, { createCanvas } = {}) {
   const safeSummary = daySummary && typeof daySummary === 'object' ? daySummary : {};
   const metrics = SHARE_METRICS;
-  const size = metrics.size;
+  const width = metrics.width;
+  const height = metrics.height;
   const plan = planSharePages(safeSummary, metrics);
 
   const makeCanvas =
@@ -1144,9 +1205,9 @@ export function buildShareCanvases(daySummary, { createCanvas } = {}) {
   const mode = plan?.mode === 'compact' ? 'compact' : 'normal';
 
   return pages.map((page) => {
-    const canvas = makeCanvas(size, size);
-    if (canvas.width !== size) canvas.width = size;
-    if (canvas.height !== size) canvas.height = size;
+    const canvas = makeCanvas(width, height);
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
     const drawCtx = canvas.getContext('2d');
     drawSharePage(drawCtx, safeSummary, page, mode, metrics);
     return canvas;

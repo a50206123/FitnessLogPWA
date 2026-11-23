@@ -153,3 +153,51 @@ export const SHARE_METRICS = Object.freeze({
 - 字級下限：compact 組數文字 ≥ 26px、器材名 ≥ 32px、備註 ≥ 24px；normal 組數 32px、器材名 40px。文字超出寬度用「…」截斷（逐字量測）。
 - 第 1 張頁首：日期大字＋年份、部位標籤、總結 4 格一列（器材數／總組數／總次數／總訓練量 kg）＋有氧加總列；第 2 張以後頁首：日期小字＋「（續）」。多張時每張右上角標「1/2」膠囊。底部置中「健身記錄」。
 - `openSharePreview(ctx, date)`：產生全部頁 → PNG 檔 `fitness-YYYY-MM-DD.png`（多張則 `-1.png`、`-2.png`）。預覽：橫向捲動 scroll-snap 容器 `.share-pages`，每張 `<img class="share-preview">` 正方形，多張時下方顯示「共 N 張，左右滑動查看」與頁點；「分享」一次送全部檔案（canShare 檢查全部檔案）；「下載圖片」逐張下載（間隔 300ms）。
+
+## v4（v0.4.0，快取 fitness-v4）
+### 1. 底部選單 5 格：月曆｜歷史｜記錄（正中、凸出圓形 FAB）｜器材｜設定
+- index.html 的 nav 順序改為 calendar、history、record、equipment、settings；新增 `<section id="tab-calendar" class="tab-panel hidden" data-tab-panel="calendar" aria-label="月曆">`。
+- 記錄鈕 `.tab-btn.tab-fab`：直徑約 64px 圓形、主色 #22c55e 底、深色圖示、向上凸出選單列約 22px、陰影與外圈（與選單底色同色的 4~6px 邊框形成弧形缺口感），active 時仍保持凸出；文字「記錄」在圓下方。啟動預設分頁仍是 record。
+### 2. 月曆（web/calendar.js，`export function renderCalendar(container, ctx)`）
+- 狀態：`ctx.view.calMonth`（'YYYY-MM'，預設今天所在月）、`ctx.view.calSelected`（'YYYY-MM-DD'，預設今天）。改完呼叫 `ctx.rerender()`。
+- 上方：「‹」「2026 年 11 月」「›」與「今天」鈕。週一開始，表頭「一 二 三 四 五 六 日」。
+- 格子：用 logic.js `buildMonthGrid`；非本月日期淡化；今天外框高亮；有紀錄的日期顯示主色圓點（count ≥ 3 顯示較大或兩個點）與底色淡綠；選取日實心主色。格子至少 44px 高。
+- 月曆下方「本月 N 天有訓練」。點某天 → calSelected，下方列出該天紀錄 `.log-item`（器材名、部位 .tag、formatLogSummary），點紀錄 → `ctx.go('record', { editLogId })`；底部按鈕「在這天新增紀錄」→ `ctx.go('record', { date })`；該天有紀錄時另加「📤 分享這天訓練」→ share.js 的 `openSharePreview(ctx, date)`。
+### 3. logic.js 新增
+- `logDateIndex(logs)` → `{ 'YYYY-MM-DD': { count, bodyParts: [...不重複，依 BODY_PARTS 順序] } }`
+- `shiftMonth(year, month, delta)` → `{ year, month }`（month 1~12，跨年正確）
+- `buildMonthGrid(year, month, logs, todayStr = toDateStr())` → `{ year, month, label: '2026 年 11 月', weeks: [ [ { date, day, inMonth, isToday, count, bodyParts } ×7 ] ... ] }`，週一開始，補齊前後月份使每週 7 格（4~6 週）。
+- `buildEquipmentExport(equipment, now = new Date())` → `{ app: 'fitness-log', type: 'equipment', version: 1, exportedAt: ISO, equipment: [...] }`
+- `parseEquipmentImport(text)` → `{ equipment: [...], errors: ['第 3 筆：器材名稱必填', ...] }`。接受：上面的匯出格式、純陣列、或完整備份 `{ equipment, logs }`。JSON 錯誤或找不到器材陣列 → 丟出 Error（正體中文）。每筆用 validateEquipment 驗證，不合格者略過並記錄錯誤；欄位缺 key 補 makeId('f_')；bodyParts 字串轉陣列；trackReps 預設 true。
+- `mergeEquipment(existing, incoming, mode = 'skip', now = new Date())` → `{ toSave: [...], added, updated, skipped }`。以名稱比對（去空白、不分大小寫）。同名：mode 'skip' 略過；'update' 保留既有 id、createdAt，其他用匯入值，且同名詳細項目沿用既有 key（避免歷史對不上），updatedAt = now。新器材：id 若與既有 id 衝突則改 makeId('eq_')，補 createdAt/updatedAt。匯入檔內重複同名只取第一筆（其餘算 skipped）。**永不刪除既有器材**。
+### 4. 設定頁「器材匯出／匯入」區塊（app.js）
+- 「匯出器材 JSON」→ 下載 `fitness-equipment-YYYY-MM-DD.json`（buildEquipmentExport）。
+- 「匯入器材 JSON」→ 選檔 → parseEquipmentImport → 預覽卡：「檔案內 N 筆器材：新增 a 筆、同名 b 筆（略過 c 筆格式錯誤）」＋錯誤清單＋單選「同名器材：略過／更新」＋「確認匯入」「取消」→ mergeEquipment → 逐筆 `ctx.store.saveEquipment`（不 await 擋畫面）→ toast。示範與雲端模式共用。保留原本的完整備份匯出／匯入。
+### 5. 記錄頁版面（app.js renderRecord）
+- 由上到下：日期列 →「這天已記錄（N）」清單（含分享鈕）→ 記錄／編輯表單（選了器材或編輯中才出現）→ 部位篩選 → 器材卡片格。
+- 點已記錄項目或器材卡後，表單出現在已記錄與器材之間，並 `scrollIntoView({ block: 'start', behavior: 'smooth' })` 捲到表單。編輯中時被編輯的那筆 .log-item 加 .editing 高亮。
+### 6. 分享圖改手機直式 9:16（1080×1920）
+- `SHARE_METRICS` 改為：
+```
+{ width: 1080, height: 1920, pad: 64, gap: 24, footerH: 72, headerOtherH: 120,
+  dateH: 130, tagRowH: 64, tagCharW: 34, tagPadW: 52, tagGap: 14, statsH: 150, cardioH: 56,
+  normal:  { cols: 1, padY: 28, titleH: 64, rowH: 58, noteLineH: 46, noteMaxLines: 2, noteCharsPerLine: 26, setsPerRow: 1 },
+  compact: { cols: 2, padY: 22, titleH: 56, rowH: 50, noteLineH: 40, noteMaxLines: 1, noteCharsPerLine: 12, setsPerRow: 2 } }
+```
+  原本用 `size` 的地方：寬用 width、高用 height（bodyH = height − pad − footerH − bodyTop；可用寬 = width − 2×pad）。規則不變（先 normal 單欄，不行改 compact 兩欄，再不行分頁）。
+- 字級：日期 104px、年份 40px、標籤 30px、總結數值 56px／標籤 30px、normal 器材名 52px／組數 42px／備註 32px、compact 器材名 44px／組數 36px／備註 30px、頁碼膠囊 30px、底部「健身記錄」30px。
+
+### 7. 分享圖直式版面修正（取代 v3 兩欄規則；依 YuChen 實機回饋）
+問題：下方大片空白、非計次器材數值沒標欄位名（顯示「6 4 15分」）、只填次數的器材標頭仍寫「kg × 下」、兩欄卡片高度不一而錯落。新規則：
+- **一律單欄**（卡片寬 = width − 2×pad）。`SHARE_METRICS.compact.cols` 改 1。
+- **有效欄位** `activeFields(log)`：只取在該筆任一組有數值的 fields（依原順序）。
+- **卡片單位標頭** `cardUnitHeader(log)`：trackReps 且有效欄位剛好 1 個 → `'{單位或欄位名} × 下'`（例「kg × 下」；單位空白時用欄位名「重量 × 下」）；trackReps 且 0 個有效欄位 → `'次數'`；其他（非計次或 ≥2 欄位）→ `''`（不顯示）。
+- **compactSetText(set, fields, trackReps)**（fields 傳有效欄位）：
+  - 1 個有效欄位且 trackReps → `'80×12'`
+  - 0 個有效欄位且 trackReps → `'20 下'`
+  - 其他 → 每個有值的欄位 `'{欄位名} {值}{單位}'`，以 `' · '` 連接（例 `'速度 6km/h · 坡度 4% · 時間 15分'`，單位空白就只有 `'速度 6'`），trackReps 再加 `' × 12 下'`
+- **formatSet 一般排版**也要同樣帶欄位名（多欄位時）：例「速度 6 km/h · 坡度 4 · 時間 15 分」。（可新增 `formatSetLabeled`，不要改壞既有 formatSet 的測試；share 用新函式）
+- **每列組數** `setsPerRowFor(log, mode)`：normal 恆 1；compact：有效欄位 ≤ 1 → 3，否則 1。
+- **planSharePages**：先試 normal 單頁；不行改 compact 單欄；再不行依序分頁（卡片放不下就換頁；單卡比整頁高 → 截斷並「…另 N 組」）。
+- **填滿版面**：每頁算 `scale = clamp(bodyH / 內容高, 1, 1.45)`（內容高 = 所有卡片高 + 間距），卡片的 padY、titleH、rowH、noteLineH 與 gap 都乘 scale，回傳的 y/h 已是放大後數值；頁面物件加 `scale` 欄位，share.js 字級也乘同一 scale。最後一頁內容少時同樣放大（上限 1.45），剩餘空白留在卡片下方、底部「健身記錄」固定在最下方。
+- 頁面回傳：`{ pageNo, total, hasSummary, bodyTop, bodyH, scale, cards: [{ logIndex, x, y, w, h, rowsShown, totalRows, hiddenSets, setsPerRow }] }`。

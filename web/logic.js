@@ -913,43 +913,47 @@ export function formatNumber(n) {
 }
 
 /**
- * 1:1 正方形分享圖（1080×1080）版面量測與分頁常數
+ * 9:16 直式分享圖（1080×1920）版面量測與分頁常數
  */
 export const SHARE_METRICS = Object.freeze({
-  size: 1080,
-  pad: 56,
-  gap: 20,
-  footerH: 56,
-  headerOtherH: 92, // 第 2 張以後的頁首（日期小字＋右上「2/3」）
+  width: 1080,
+  height: 1920,
+  pad: 64,
+  gap: 24,
+  footerH: 72,
+  headerOtherH: 120, // 第 2 張以後的頁首（日期小字＋右上「2/3」）
   // 第 1 張頁首 = dateH + gap + tagsH(標籤列數 × tagRowH) + gap + statsH + (有 cardio ? cardioH : 0) + gap
-  dateH: 100,
-  tagRowH: 52,
-  tagCharW: 28,
-  tagPadW: 44,
-  tagGap: 12,
-  statsH: 120,
-  cardioH: 44,
+  dateH: 130,
+  tagRowH: 64,
+  tagCharW: 34,
+  tagPadW: 52,
+  tagGap: 14,
+  statsH: 150,
+  cardioH: 56,
   normal: Object.freeze({
     cols: 1,
-    padY: 22,
-    titleH: 50,
-    rowH: 44,
-    noteLineH: 36,
+    padY: 28,
+    titleH: 64,
+    rowH: 58,
+    noteLineH: 46,
     noteMaxLines: 2,
-    noteCharsPerLine: 34,
+    noteCharsPerLine: 26,
     setsPerRow: 1,
   }),
   compact: Object.freeze({
-    cols: 2,
-    padY: 16,
-    titleH: 44,
-    rowH: 38,
-    noteLineH: 32,
+    cols: 1,
+    padY: 22,
+    titleH: 56,
+    rowH: 50,
+    noteLineH: 40,
     noteMaxLines: 1,
-    noteCharsPerLine: 16,
+    noteCharsPerLine: 12,
     setsPerRow: 2,
   }),
 });
+
+/** 分享圖每頁內容自動放大的最大倍率 */
+const SHARE_SCALE_MAX = 1.45;
 
 /**
  * 判斷單組欄位值或次數是否為空值
@@ -958,14 +962,115 @@ export const SHARE_METRICS = Object.freeze({
  */
 function isEmptySetValue(val) {
   if (val === undefined || val === null) return true;
+  if (typeof val === 'number' && Number.isNaN(val)) return true;
   if (typeof val === 'string' && val.trim() === '') return true;
   return false;
 }
 
 /**
- * 計算緊湊模式下的單組文字
- * - 只有 1 個欄位且記錄次數：省略單位，例如 '80×12'
- * - 其他情況：各欄位以「值+單位」空白連接（例如 '6km/h 1% 5分'），若記錄次數再加 ' ×12'
+ * 取得訓練紀錄的有效欄位：只保留在該筆任一組有填寫數值的欄位（維持原順序）
+ * @param {object} log 訓練紀錄
+ * @returns {Array<{ key: string, name?: string, unit?: string }>}
+ */
+export function activeFields(log) {
+  const fields = Array.isArray(log?.fields) ? log.fields : [];
+  const sets = Array.isArray(log?.sets) ? log.sets : [];
+  if (fields.length === 0 || sets.length === 0) return [];
+
+  return fields.filter((field) => {
+    if (!field || !field.key) return false;
+    return sets.some((set) => {
+      if (!set || !set.values || typeof set.values !== 'object') return false;
+      return !isEmptySetValue(set.values[field.key]);
+    });
+  });
+}
+
+/**
+ * 產生分享圖器材卡片標題旁的單位標頭
+ * - 記錄次數且有效欄位剛好 1 個：'{單位或欄位名} × 下'（單位空白時使用欄位名）
+ * - 記錄次數且有效欄位為 0 個：'次數'
+ * - 其他（非計次或有效欄位 ≥ 2 個）：''（不顯示）
+ * @param {object} log 訓練紀錄
+ * @returns {string}
+ */
+export function cardUnitHeader(log) {
+  if (!log || typeof log !== 'object') return '';
+  if (log.trackReps === false) return '';
+
+  const fields = activeFields(log);
+  if (fields.length === 0) return '次數';
+  if (fields.length === 1) {
+    const unit = String(fields[0].unit ?? '').trim();
+    const name = String(fields[0].name ?? '').trim();
+    const label = unit || name;
+    return label ? `${label} × 下` : '次數';
+  }
+  return '';
+}
+
+/**
+ * 將單組資料格式化為帶欄位名稱的易讀字串（供分享圖一般排版使用）
+ * - 單一有效欄位且記錄次數時，沿用簡潔格式（如 '80 kg × 12 下'；無單位時補欄位名）
+ * - 多欄位或非計次器材時，各欄位皆附上欄位名稱（如 '速度 6 km/h · 坡度 4 · 時間 15 分'）
+ * @param {{ reps?: number | string, values?: Record<string, any> }} set
+ * @param {Array<{ key: string, name?: string, unit?: string }>} [fields=[]]
+ * @param {boolean} [trackReps=true]
+ * @returns {string}
+ */
+export function formatSetLabeled(set, fields = [], trackReps = true) {
+  if (!set || typeof set !== 'object') return '';
+
+  const fieldList = Array.isArray(fields)
+    ? fields.filter((f) => f && f.key)
+    : [];
+  const values = set.values && typeof set.values === 'object' ? set.values : {};
+  const useReps = trackReps !== false;
+  const showFieldName = !useReps || fieldList.length >= 2;
+  const fieldParts = [];
+
+  for (const field of fieldList) {
+    const val = values[field.key];
+    if (isEmptySetValue(val)) continue;
+    const name = String(field.name ?? '').trim();
+    const unit = String(field.unit ?? '').trim();
+
+    if (showFieldName) {
+      if (name && unit) {
+        fieldParts.push(`${name} ${val} ${unit}`);
+      } else if (name) {
+        fieldParts.push(`${name} ${val}`);
+      } else if (unit) {
+        fieldParts.push(`${val} ${unit}`);
+      } else {
+        fieldParts.push(String(val));
+      }
+    } else if (unit) {
+      fieldParts.push(`${val} ${unit}`);
+    } else if (name) {
+      fieldParts.push(`${name} ${val}`);
+    } else {
+      fieldParts.push(String(val));
+    }
+  }
+
+  const hasReps = useReps && !isEmptySetValue(set.reps);
+  const repsPart = hasReps ? `${set.reps} 下` : '';
+
+  if (fieldParts.length > 0 && hasReps) {
+    return `${fieldParts.join(' · ')} × ${repsPart}`;
+  }
+  if (fieldParts.length > 0) {
+    return fieldParts.join(' · ');
+  }
+  return repsPart;
+}
+
+/**
+ * 計算緊湊模式下的單組文字（fields 傳有效欄位）
+ * - 1 個有效欄位且記錄次數：輸出 '80×12'
+ * - 0 個有效欄位且記錄次數：輸出 '20 下'
+ * - 其他：每個有值的欄位為 '{欄位名} {值}{單位}'，以 ' · ' 連接，若記錄次數再加 ' × 12 下'
  * - 空值略過
  * @param {{ reps?: number | string, values?: Record<string, any> }} set
  * @param {Array<{ key: string, name?: string, unit?: string }>} [fields=[]]
@@ -982,37 +1087,58 @@ export function compactSetText(set, fields = [], trackReps = true) {
   const useReps = trackReps !== false;
   const hasReps = useReps && !isEmptySetValue(set.reps);
 
-  // 只有 1 個欄位且記錄次數時，單位已標示於卡片標題旁，直接輸出 '80×12'
+  // 1 個有效欄位且記錄次數時，單位已標示於卡片標題旁，直接輸出 '80×12'
   if (fieldList.length === 1 && useReps) {
     const val = values[fieldList[0].key];
     const hasVal = !isEmptySetValue(val);
     if (hasVal && hasReps) return `${val}×${set.reps}`;
     if (hasVal) return String(val);
-    if (hasReps) return `${set.reps}下`;
+    if (hasReps) return `${set.reps} 下`;
     return '';
   }
 
+  // 0 個有效欄位且記錄次數時，直接輸出 '20 下'
+  if (fieldList.length === 0 && useReps) {
+    return hasReps ? `${set.reps} 下` : '';
+  }
+
+  // 其他情況（非計次或 ≥2 欄位）：各欄位以 '{欄位名} {值}{單位}' 呈現並以 ' · ' 連接
   const parts = [];
   for (const field of fieldList) {
     const val = values[field.key];
     if (isEmptySetValue(val)) continue;
+    const name = String(field.name ?? '').trim();
     const unit = String(field.unit ?? '').trim();
-    parts.push(unit ? `${val}${unit}` : String(val));
+    const valWithUnit = unit ? `${val}${unit}` : String(val);
+    parts.push(name ? `${name} ${valWithUnit}` : valWithUnit);
   }
 
   if (hasReps) {
     if (parts.length > 0) {
-      return `${parts.join(' ')} ×${set.reps}`;
+      return `${parts.join(' · ')} × ${set.reps} 下`;
     }
-    return `${set.reps}下`;
+    return `${set.reps} 下`;
   }
 
-  return parts.join(' ');
+  return parts.join(' · ');
+}
+
+/**
+ * 計算分享圖卡片每列顯示的組數
+ * - normal 模式恆為 1
+ * - compact 模式：有效欄位 ≤ 1 個時為 3，否則為 1
+ * @param {object} log 訓練紀錄
+ * @param {'normal' | 'compact'} [mode='normal'] 排版模式
+ * @returns {number}
+ */
+export function setsPerRowFor(log, mode = 'normal') {
+  if (mode !== 'compact') return 1;
+  return activeFields(log).length <= 1 ? 3 : 1;
 }
 
 /**
  * 估計分享圖訓練部位標籤所佔列數
- * 每個標籤寬 = 字數 × tagCharW + tagPadW，標籤間加 tagGap，超過可用寬（size − 2×pad）則換列；無部位回傳 0。
+ * 每個標籤寬 = 字數 × tagCharW + tagPadW，標籤間加 tagGap，超過可用寬（width − 2×pad）則換列；無部位回傳 0。
  * @param {string[]} bodyParts
  * @param {typeof SHARE_METRICS} [metrics=SHARE_METRICS]
  * @returns {number}
@@ -1025,7 +1151,7 @@ export function shareTagRows(bodyParts, metrics = SHARE_METRICS) {
     : [];
   if (tags.length === 0) return 0;
 
-  const maxW = metrics.size - 2 * metrics.pad;
+  const maxW = metrics.width - 2 * metrics.pad;
   let rows = 1;
   let lineW = 0;
 
@@ -1079,11 +1205,9 @@ export function firstHeaderHeight(daySummary, metrics = SHARE_METRICS) {
 function getCardLayoutMeta(log, mode, metrics) {
   const cfg = mode === 'compact' ? metrics.compact : metrics.normal;
   const sets = Array.isArray(log?.sets) ? log.sets : [];
-  const fields = Array.isArray(log?.fields) ? log.fields : [];
 
-  // compact 且欄位數 ≤ 1 時每列排 setsPerRow（2）組，其餘皆為每列 1 組
-  const perRow =
-    mode === 'compact' && fields.length <= 1 ? cfg.setsPerRow : 1;
+  // 依 setsPerRowFor 與有效欄位決定每列組數（normal 恆為 1；compact 有效欄位 ≤ 1 為 3，否則 1）
+  const perRow = setsPerRowFor(log, mode);
   const totalRows = Math.ceil(sets.length / perRow);
 
   const note = typeof log?.note === 'string' ? log.note.trim() : '';
@@ -1108,7 +1232,7 @@ function getCardLayoutMeta(log, mode, metrics) {
 
 /**
  * 估算單張器材卡片高度
- * 公式：2×padY + titleH + 列數×rowH + 備註列數×noteLineH
+ * 公式：2×padY + titleH + 列數×rowH + 備註列數×noteLineH（列數依 setsPerRowFor 與有效欄位計算）
  * @param {object} log 訓練紀錄
  * @param {'normal' | 'compact'} [mode='normal'] 排版模式
  * @param {typeof SHARE_METRICS} [metrics=SHARE_METRICS]
@@ -1123,7 +1247,73 @@ export function estimateCardHeight(
 }
 
 /**
- * 規劃 1:1 正方形分享圖的排版模式（normal / compact）與各頁卡片座標
+ * 依單頁可用高度計算縮放倍率（clamp 1~1.45），並產出放大後的卡片座標與高度
+ * 卡片的 padY、titleH、rowH、noteLineH 與卡片間 gap 皆乘上 scale（故卡片總高 = 未縮放高 × scale）
+ * @param {Array<{
+ *   logIndex: number,
+ *   unscaledH: number,
+ *   rowsShown: number,
+ *   totalRows: number,
+ *   hiddenSets: number,
+ *   setsPerRow: number
+ * }>} rawCards
+ * @param {number} bodyTop
+ * @param {number} bodyH
+ * @param {number} cardW
+ * @param {typeof SHARE_METRICS} metrics
+ * @returns {{ scale: number, cards: Array<object> }}
+ */
+function scalePageCards(rawCards, bodyTop, bodyH, cardW, metrics) {
+  if (rawCards.length === 0) {
+    return { scale: 1, cards: [] };
+  }
+
+  const totalCardsH = rawCards.reduce((sum, c) => sum + c.unscaledH, 0);
+  const contentH =
+    totalCardsH + Math.max(0, rawCards.length - 1) * metrics.gap;
+
+  let scale =
+    contentH > 0 ? Math.min(SHARE_SCALE_MAX, Math.max(1, bodyH / contentH)) : 1;
+
+  const placeCards = (s) => {
+    const scaledGap = metrics.gap * s;
+    const placed = [];
+    let cursorY = bodyTop;
+    for (let i = 0; i < rawCards.length; i++) {
+      const c = rawCards[i];
+      const y = i === 0 ? cursorY : cursorY + scaledGap;
+      const h = c.unscaledH * s;
+      placed.push({
+        logIndex: c.logIndex,
+        x: metrics.pad,
+        y,
+        w: cardW,
+        h,
+        rowsShown: c.rowsShown,
+        totalRows: c.totalRows,
+        hiddenSets: c.hiddenSets,
+        setsPerRow: c.setsPerRow,
+      });
+      cursorY = y + h;
+    }
+    return placed;
+  };
+
+  let cards = placeCards(scale);
+
+  // 避免浮點數尾數誤差導致最後一張卡片下緣略微超出 bodyTop + bodyH
+  const last = cards[cards.length - 1];
+  if (last && last.y + last.h > bodyTop + bodyH && scale > 1) {
+    const actualSpan = last.y + last.h - bodyTop;
+    scale = Math.max(1, scale * (bodyH / actualSpan) - 1e-9);
+    cards = placeCards(scale);
+  }
+
+  return { scale, cards };
+}
+
+/**
+ * 規劃 9:16 直式分享圖的單欄排版模式（normal / compact）、每頁縮放倍率與各頁卡片座標
  * @param {object} daySummary 當日摘要物件（由 summarizeDay 產生）
  * @param {typeof SHARE_METRICS} [metrics=SHARE_METRICS]
  * @returns {{
@@ -1134,26 +1324,27 @@ export function estimateCardHeight(
  *     hasSummary: boolean,
  *     bodyTop: number,
  *     bodyH: number,
+ *     scale: number,
  *     cards: Array<{
  *       logIndex: number,
- *       col: number,
  *       x: number,
  *       y: number,
  *       w: number,
  *       h: number,
  *       rowsShown: number,
  *       totalRows: number,
- *       hiddenSets: number
+ *       hiddenSets: number,
+ *       setsPerRow: number
  *     }>
  *   }>
  * }}
  */
 export function planSharePages(daySummary, metrics = SHARE_METRICS) {
   const logs = Array.isArray(daySummary?.logs) ? daySummary.logs : [];
-  const W = metrics.size - 2 * metrics.pad;
+  const W = metrics.width - 2 * metrics.pad;
   const firstBodyTop = metrics.pad + firstHeaderHeight(daySummary, metrics);
   const firstBodyH =
-    metrics.size - metrics.pad - metrics.footerH - firstBodyTop;
+    metrics.height - metrics.pad - metrics.footerH - firstBodyTop;
 
   // 空陣列回傳 1 張只有總結的空白頁
   if (logs.length === 0) {
@@ -1166,39 +1357,45 @@ export function planSharePages(daySummary, metrics = SHARE_METRICS) {
           hasSummary: true,
           bodyTop: firstBodyTop,
           bodyH: firstBodyH,
+          scale: 1,
           cards: [],
         },
       ],
     };
   }
 
-  // 1. 先嘗試 normal 單欄模式：若全部卡片可放入第 1 張則直接回傳
-  const normalCards = [];
-  let cursorY = firstBodyTop;
+  // 1. 先嘗試 normal 單欄單頁：若全部卡片可放入第 1 張則放大填滿後回傳
+  const normalRawCards = [];
+  let normalUsedH = 0;
   let fitsNormal = true;
 
   for (let i = 0; i < logs.length; i++) {
     const meta = getCardLayoutMeta(logs[i], 'normal', metrics);
-    const y = i === 0 ? cursorY : cursorY + metrics.gap;
-    if (y + meta.fullH > firstBodyTop + firstBodyH) {
+    const nextUsedH =
+      normalUsedH === 0 ? meta.fullH : normalUsedH + metrics.gap + meta.fullH;
+    if (nextUsedH > firstBodyH) {
       fitsNormal = false;
       break;
     }
-    normalCards.push({
+    normalRawCards.push({
       logIndex: i,
-      col: 0,
-      x: metrics.pad,
-      y,
-      w: W,
-      h: meta.fullH,
+      unscaledH: meta.fullH,
       rowsShown: meta.totalRows,
       totalRows: meta.totalRows,
       hiddenSets: 0,
+      setsPerRow: meta.perRow,
     });
-    cursorY = y + meta.fullH;
+    normalUsedH = nextUsedH;
   }
 
   if (fitsNormal) {
+    const { scale, cards } = scalePageCards(
+      normalRawCards,
+      firstBodyTop,
+      firstBodyH,
+      W,
+      metrics
+    );
     return {
       mode: 'normal',
       pages: [
@@ -1208,122 +1405,604 @@ export function planSharePages(daySummary, metrics = SHARE_METRICS) {
           hasSummary: true,
           bodyTop: firstBodyTop,
           bodyH: firstBodyH,
-          cards: normalCards,
+          scale,
+          cards,
         },
       ],
     };
   }
 
-  // 2. 否則採用 compact 兩欄模式，必要時自動分頁與截斷超長組數
-  const cw = (W - metrics.gap) / 2;
-  const colX = [metrics.pad, metrics.pad + cw + metrics.gap];
+  // 2. 否則採用 compact 單欄模式，依序分頁並於單卡過高時截斷組數
   const otherBodyTop = metrics.pad + metrics.headerOtherH;
   const otherBodyH =
-    metrics.size - metrics.pad - metrics.footerH - otherBodyTop;
+    metrics.height - metrics.pad - metrics.footerH - otherBodyTop;
   const compactCfg = metrics.compact;
 
-  const pages = [];
+  /**
+   * 依序貪婪裝卡；cap 為每頁容量上限（用於頁面平衡），Infinity 表示只受 bodyH 限制
+   * @param {number} cap
+   * @returns {Array<object>}
+   */
+  function packCompact(cap) {
+    const rawPages = [];
 
-  /** 建立新頁並回傳頁面與雙欄已用高度狀態 */
-  function createPage(hasSummary) {
-    const bodyTop = hasSummary ? firstBodyTop : otherBodyTop;
-    const bodyH = hasSummary ? firstBodyH : otherBodyH;
-    const page = {
-      pageNo: pages.length + 1,
-      total: 0,
-      hasSummary,
-      bodyTop,
-      bodyH,
-      cards: [],
-    };
-    pages.push(page);
-    return { page, colUsed: [0, 0] };
+    /** 建立新頁（單欄） */
+    function createRawPage(hasSummary) {
+      const page = {
+        hasSummary,
+        bodyTop: hasSummary ? firstBodyTop : otherBodyTop,
+        bodyH: hasSummary ? firstBodyH : otherBodyH,
+        usedH: 0,
+        rawCards: [],
+      };
+      rawPages.push(page);
+      return page;
+    }
+
+    let current = createRawPage(true);
+
+    for (let i = 0; i < logs.length; i++) {
+      const meta = getCardLayoutMeta(logs[i], 'compact', metrics);
+
+      // 空頁只受 bodyH 限制（避免不必要的截斷）；已有卡片時受 min(cap, bodyH) 限制
+      const canFit = (page) => {
+        const nextUsed =
+          page.usedH === 0 ? meta.fullH : page.usedH + metrics.gap + meta.fullH;
+        const limit = page.rawCards.length === 0 ? page.bodyH : Math.min(cap, page.bodyH);
+        return nextUsed <= limit;
+      };
+
+      // 目前頁放不下且已有其他卡片 → 換新一頁（hasSummary: false）
+      if (!canFit(current) && current.rawCards.length > 0) {
+        current = createRawPage(false);
+      }
+
+      if (canFit(current)) {
+        current.rawCards.push({
+          logIndex: i,
+          unscaledH: meta.fullH,
+          rowsShown: meta.totalRows,
+          totalRows: meta.totalRows,
+          hiddenSets: 0,
+          setsPerRow: meta.perRow,
+        });
+        current.usedH =
+          current.usedH === 0
+            ? meta.fullH
+            : current.usedH + metrics.gap + meta.fullH;
+        continue;
+      }
+
+      // 單張卡片比一整頁 bodyH 還高 → 截斷組數並保留 1 列顯示「…另 N 組」
+      const availForRows = current.bodyH - meta.baseH;
+      const maxTotalRows = Math.floor(availForRows / compactCfg.rowH);
+      let rowsShown = meta.totalRows;
+      let hiddenSets = 0;
+      let unscaledH = meta.fullH;
+
+      if (meta.totalRows > 1) {
+        rowsShown = Math.max(1, Math.min(meta.totalRows - 1, maxTotalRows - 1));
+        hiddenSets = Math.max(0, meta.setCount - rowsShown * meta.perRow);
+        unscaledH = meta.baseH + (rowsShown + 1) * compactCfg.rowH;
+      }
+
+      current.rawCards.push({
+        logIndex: i,
+        unscaledH,
+        rowsShown,
+        totalRows: meta.totalRows,
+        hiddenSets,
+        setsPerRow: meta.perRow,
+      });
+      current.usedH = unscaledH;
+    }
+    return rawPages;
   }
 
-  let current = createPage(true);
-
-  for (let i = 0; i < logs.length; i++) {
-    const meta = getCardLayoutMeta(logs[i], 'compact', metrics);
-
-    /** 檢查指定欄位在目前頁面上是否放得下完整卡片 */
-    const canFitInCol = (state, col) => {
-      const used = state.colUsed[col];
-      const nextUsed = used === 0 ? meta.fullH : used + metrics.gap + meta.fullH;
-      return nextUsed <= state.page.bodyH;
-    };
-
-    // 先依規則選擇目前高度較低的那欄（同高選 col 0），放不下再試另一欄
-    const primaryCol = current.colUsed[0] <= current.colUsed[1] ? 0 : 1;
-    const otherCol = 1 - primaryCol;
-
-    let targetCol = -1;
-    if (canFitInCol(current, primaryCol)) {
-      targetCol = primaryCol;
-    } else if (canFitInCol(current, otherCol)) {
-      targetCol = otherCol;
-    } else if (current.page.cards.length > 0) {
-      // 目前頁兩欄皆放不下且已有其他卡片 → 開新一頁（hasSummary: false）
-      current = createPage(false);
-      if (canFitInCol(current, 0)) {
-        targetCol = 0;
+  // 先用純貪婪法求頁數 N；N > 1 時做「頁面平衡」：
+  // 二分搜尋最小容量上限 C，使依序裝卡仍在 N 頁內完成，避免最後一頁只剩一張卡
+  let rawPages = packCompact(Infinity);
+  const pageCount = rawPages.length;
+  if (pageCount > 1) {
+    const sumH = logs.reduce(
+      (sum, log) => sum + getCardLayoutMeta(log, 'compact', metrics).fullH,
+      0
+    );
+    let lo = Math.floor(sumH / pageCount);
+    let hi = Math.max(firstBodyH, otherBodyH);
+    let best = rawPages;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const trial = packCompact(mid);
+      if (trial.length <= pageCount) {
+        best = trial;
+        hi = mid;
+      } else {
+        lo = mid + 1;
       }
     }
-
-    if (targetCol !== -1) {
-      const used = current.colUsed[targetCol];
-      const y =
-        current.page.bodyTop + (used === 0 ? 0 : used + metrics.gap);
-      current.page.cards.push({
-        logIndex: i,
-        col: targetCol,
-        x: colX[targetCol],
-        y,
-        w: cw,
-        h: meta.fullH,
-        rowsShown: meta.totalRows,
-        totalRows: meta.totalRows,
-        hiddenSets: 0,
-      });
-      current.colUsed[targetCol] =
-        used === 0 ? meta.fullH : used + metrics.gap + meta.fullH;
-      continue;
-    }
-
-    // 單張卡片比一整頁 bodyH 還高 → 截斷組數並保留 1 列顯示「…另 N 組」
-    const availForRows = current.page.bodyH - meta.baseH;
-    const maxTotalRows = Math.floor(availForRows / compactCfg.rowH);
-    let rowsShown = meta.totalRows;
-    let hiddenSets = 0;
-    let cardH = meta.fullH;
-
-    if (meta.totalRows > 1) {
-      rowsShown = Math.max(1, Math.min(meta.totalRows - 1, maxTotalRows - 1));
-      hiddenSets = Math.max(0, meta.setCount - rowsShown * meta.perRow);
-      cardH = meta.baseH + (rowsShown + 1) * compactCfg.rowH;
-    }
-
-    current.page.cards.push({
-      logIndex: i,
-      col: 0,
-      x: colX[0],
-      y: current.page.bodyTop,
-      w: cw,
-      h: cardH,
-      rowsShown,
-      totalRows: meta.totalRows,
-      hiddenSets,
-    });
-    current.colUsed[0] = cardH;
+    const finalTrial = packCompact(lo);
+    rawPages = finalTrial.length <= pageCount ? finalTrial : best;
   }
 
-  // 回填總頁數
-  const totalPages = pages.length;
-  for (const page of pages) {
-    page.total = totalPages;
-  }
+  // 每頁分別計算縮放倍率並回填總頁數
+  const totalPages = rawPages.length;
+  const pages = rawPages.map((rawPage, idx) => {
+    const { scale, cards } = scalePageCards(
+      rawPage.rawCards,
+      rawPage.bodyTop,
+      rawPage.bodyH,
+      W,
+      metrics
+    );
+    return {
+      pageNo: idx + 1,
+      total: totalPages,
+      hasSummary: rawPage.hasSummary,
+      bodyTop: rawPage.bodyTop,
+      bodyH: rawPage.bodyH,
+      scale,
+      cards,
+    };
+  });
 
   return {
     mode: 'compact',
     pages,
   };
+}
+
+/**
+ * 將訓練部位集合依 BODY_PARTS 預設順序排序，自訂部位排在後面
+ * @param {Iterable<string>} parts
+ * @returns {string[]}
+ */
+function sortBodyParts(parts) {
+  return Array.from(parts).sort((a, b) => {
+    const idxA = BODY_PARTS.indexOf(a);
+    const idxB = BODY_PARTS.indexOf(b);
+    const inDefaultA = idxA !== -1;
+    const inDefaultB = idxB !== -1;
+
+    if (inDefaultA && inDefaultB) return idxA - idxB;
+    if (inDefaultA) return -1;
+    if (inDefaultB) return 1;
+    return a.localeCompare(b, 'zh-Hant');
+  });
+}
+
+/**
+ * 依日期建立訓練紀錄索引：統計每日紀錄筆數與不重複訓練部位（依 BODY_PARTS 順序）
+ * @param {Array<object>} logs 訓練紀錄陣列
+ * @returns {Record<string, { count: number, bodyParts: string[] }>}
+ */
+export function logDateIndex(logs) {
+  const index = {};
+  if (!Array.isArray(logs) || logs.length === 0) return index;
+
+  const partSets = new Map();
+  const counts = new Map();
+
+  for (const log of logs) {
+    if (!log || typeof log !== 'object') continue;
+    const date = typeof log.date === 'string' ? log.date.trim() : '';
+    if (!date) continue;
+
+    counts.set(date, (counts.get(date) || 0) + 1);
+    if (!partSets.has(date)) {
+      partSets.set(date, new Set());
+    }
+    const set = partSets.get(date);
+    if (Array.isArray(log.bodyParts)) {
+      for (const rawPart of log.bodyParts) {
+        const part = typeof rawPart === 'string' ? rawPart.trim() : '';
+        if (part) set.add(part);
+      }
+    }
+  }
+
+  for (const [date, count] of counts.entries()) {
+    index[date] = {
+      count,
+      bodyParts: sortBodyParts(partSets.get(date)),
+    };
+  }
+
+  return index;
+}
+
+/**
+ * 計算增減月份後的年份與月份（month 為 1~12，跨年正確）
+ * @param {number} year 年份
+ * @param {number} month 月份（1~12）
+ * @param {number} delta 月份偏移量（可正可負）
+ * @returns {{ year: number, month: number }}
+ */
+export function shiftMonth(year, month, delta) {
+  const totalMonths = year * 12 + (month - 1) + delta;
+  const nextYear = Math.floor(totalMonths / 12);
+  const nextMonth = (((totalMonths % 12) + 12) % 12) + 1;
+  return { year: nextYear, month: nextMonth };
+}
+
+/**
+ * 建立月曆格線資料：週一開始，補齊前後月份使每週 7 格（4~6 週）
+ * @param {number} year 年份
+ * @param {number} month 月份（1~12）
+ * @param {Array<object>} [logs=[]] 訓練紀錄陣列
+ * @param {string} [todayStr=toDateStr()] 今天日期字串 'YYYY-MM-DD'
+ * @returns {{
+ *   year: number,
+ *   month: number,
+ *   label: string,
+ *   weeks: Array<Array<{
+ *     date: string,
+ *     day: number,
+ *     inMonth: boolean,
+ *     isToday: boolean,
+ *     count: number,
+ *     bodyParts: string[]
+ *   }>>
+ * }}
+ */
+export function buildMonthGrid(year, month, logs = [], todayStr = toDateStr()) {
+  const index = logDateIndex(logs);
+  const firstDay = new Date(year, month - 1, 1);
+  const daysInMonth = new Date(year, month, 0).getDate();
+
+  // 以週一為每週第一天（週一=0、週二=1、…、週日=6）
+  const startOffset = (firstDay.getDay() + 6) % 7;
+  const weekCount = Math.ceil((startOffset + daysInMonth) / 7);
+
+  const weeks = [];
+  for (let w = 0; w < weekCount; w++) {
+    const week = [];
+    for (let d = 0; d < 7; d++) {
+      const cellDayOffset = w * 7 + d - startOffset;
+      const cellDate = new Date(year, month - 1, 1 + cellDayOffset);
+      const dateStr = toDateStr(cellDate);
+      const entry = index[dateStr];
+      week.push({
+        date: dateStr,
+        day: cellDate.getDate(),
+        inMonth:
+          cellDate.getFullYear() === year && cellDate.getMonth() === month - 1,
+        isToday: dateStr === todayStr,
+        count: entry ? entry.count : 0,
+        bodyParts: entry ? [...entry.bodyParts] : [],
+      });
+    }
+    weeks.push(week);
+  }
+
+  return {
+    year,
+    month,
+    label: `${year} 年 ${month} 月`,
+    weeks,
+  };
+}
+
+/**
+ * 建立器材清單匯出物件（供 JSON 匯出使用）
+ * @param {Array<object>} equipment 器材陣列
+ * @param {Date | string | number} [now=new Date()] 匯出時間
+ * @returns {{ app: string, type: string, version: number, exportedAt: string, equipment: Array<object> }}
+ */
+export function buildEquipmentExport(equipment, now = new Date()) {
+  const exportedAt = (now instanceof Date ? now : new Date(now)).toISOString();
+  const list = Array.isArray(equipment)
+    ? equipment
+        .filter((eq) => eq && typeof eq === 'object')
+        .map((eq) => structuredClone(eq))
+    : [];
+
+  return {
+    app: 'fitness-log',
+    type: 'equipment',
+    version: 1,
+    exportedAt,
+    equipment: list,
+  };
+}
+
+/**
+ * 將器材訓練部位正規化為不重複字串陣列（支援陣列或逗號／頓號分隔字串）
+ * @param {unknown} rawBodyParts
+ * @returns {string[]}
+ */
+function normalizeBodyParts(rawBodyParts) {
+  let list = [];
+  if (Array.isArray(rawBodyParts)) {
+    list = rawBodyParts
+      .map((p) => (typeof p === 'string' ? p.trim() : ''))
+      .filter(Boolean);
+  } else if (typeof rawBodyParts === 'string') {
+    list = rawBodyParts
+      .split(/[,，、]/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+  }
+  return Array.from(new Set(list));
+}
+
+/**
+ * 解析器材匯入 JSON 文字
+ * 接受：器材匯出格式、純陣列、或完整備份 { equipment, logs }。
+ * JSON 錯誤或找不到器材陣列時拋出正體中文 Error；不合格筆數會略過並記錄於 errors。
+ * @param {string} text JSON 文字
+ * @returns {{ equipment: Array<object>, errors: string[] }}
+ */
+export function parseEquipmentImport(text) {
+  if (typeof text !== 'string' || text.trim() === '') {
+    throw new Error('匯入內容不可為空白');
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error('JSON 格式錯誤，無法解析匯入檔案');
+  }
+
+  let rawList = null;
+  if (Array.isArray(parsed)) {
+    rawList = parsed;
+  } else if (
+    parsed &&
+    typeof parsed === 'object' &&
+    Array.isArray(parsed.equipment)
+  ) {
+    rawList = parsed.equipment;
+  }
+
+  if (!rawList) {
+    throw new Error('找不到器材陣列（請提供器材匯出檔、完整備份或器材陣列 JSON）');
+  }
+
+  const equipment = [];
+  const errors = [];
+
+  for (let i = 0; i < rawList.length; i++) {
+    const raw = rawList[i];
+    const rowLabel = `第 ${i + 1} 筆`;
+
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      errors.push(`${rowLabel}：器材資料格式不正確`);
+      continue;
+    }
+
+    const fields = Array.isArray(raw.fields)
+      ? raw.fields.map((f) => {
+          if (!f || typeof f !== 'object') {
+            return { key: makeId('f_'), name: '', unit: '' };
+          }
+          const key =
+            typeof f.key === 'string' && f.key.trim()
+              ? f.key.trim()
+              : makeId('f_');
+          const name = typeof f.name === 'string' ? f.name.trim() : '';
+          const unit = typeof f.unit === 'string' ? f.unit.trim() : '';
+          return { key, name, unit };
+        })
+      : [];
+
+    const normalized = {
+      name: typeof raw.name === 'string' ? raw.name.trim() : '',
+      bodyParts: normalizeBodyParts(raw.bodyParts),
+      instructions:
+        typeof raw.instructions === 'string' ? raw.instructions : '',
+      trackReps:
+        raw.trackReps === undefined || raw.trackReps === null
+          ? true
+          : Boolean(raw.trackReps),
+      fields,
+    };
+
+    if (typeof raw.id === 'string' && raw.id.trim()) {
+      normalized.id = raw.id.trim();
+    }
+    if (typeof raw.createdAt === 'string' && raw.createdAt.trim()) {
+      normalized.createdAt = raw.createdAt.trim();
+    }
+    if (typeof raw.updatedAt === 'string' && raw.updatedAt.trim()) {
+      normalized.updatedAt = raw.updatedAt.trim();
+    }
+
+    const itemErrors = validateEquipment(normalized);
+    if (itemErrors.length > 0) {
+      errors.push(`${rowLabel}：${itemErrors.join('；')}`);
+      continue;
+    }
+
+    equipment.push(normalized);
+  }
+
+  return { equipment, errors };
+}
+
+/**
+ * 合併既有器材與匯入器材清單（永不刪除既有器材）
+ * - 以器材名稱比對（去空白、不分大小寫）
+ * - 匯入檔內重複同名只取第一筆（其餘計入 skipped）
+ * - 同名器材：mode 為 'skip' 時略過；'update' 時保留既有 id、createdAt，同名詳細項目沿用既有 key，updatedAt 設為 now
+ * - 新器材：若 id 缺漏或與既有 id 衝突則改用 makeId('eq_')，並補齊 createdAt／updatedAt
+ * @param {Array<object>} existing 既有器材陣列
+ * @param {Array<object>} incoming 匯入器材陣列
+ * @param {'skip' | 'update'} [mode='skip'] 同名處理模式
+ * @param {Date | string | number} [now=new Date()] 合併時間
+ * @returns {{ toSave: Array<object>, added: number, updated: number, skipped: number }}
+ */
+export function mergeEquipment(
+  existing,
+  incoming,
+  mode = 'skip',
+  now = new Date()
+) {
+  const existingList = Array.isArray(existing)
+    ? existing.filter((eq) => eq && typeof eq === 'object')
+    : [];
+  const incomingList = Array.isArray(incoming)
+    ? incoming.filter((eq) => eq && typeof eq === 'object')
+    : [];
+  const nowIso = (now instanceof Date ? now : new Date(now)).toISOString();
+
+  const normKey = (str) =>
+    typeof str === 'string' ? str.trim().toLowerCase() : '';
+
+  const existingByName = new Map();
+  const usedIds = new Set();
+
+  for (const eq of existingList) {
+    if (typeof eq.id === 'string' && eq.id.trim()) {
+      usedIds.add(eq.id.trim());
+    }
+    const nameKey = normKey(eq.name);
+    if (nameKey && !existingByName.has(nameKey)) {
+      existingByName.set(nameKey, eq);
+    }
+  }
+
+  const seenIncomingNames = new Set();
+  const toSave = [];
+  let added = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const item of incomingList) {
+    const nameKey = normKey(item.name);
+    if (!nameKey) {
+      skipped += 1;
+      continue;
+    }
+
+    // 匯入檔內重複同名只取第一筆，其餘算略過
+    if (seenIncomingNames.has(nameKey)) {
+      skipped += 1;
+      continue;
+    }
+    seenIncomingNames.add(nameKey);
+
+    const rawFields = Array.isArray(item.fields) ? item.fields : [];
+    const existingEq = existingByName.get(nameKey);
+
+    if (existingEq) {
+      if (mode !== 'update') {
+        skipped += 1;
+        continue;
+      }
+
+      // 建立既有詳細項目的「正規化名稱 → key」對照表，同名欄位沿用既有 key
+      const prevKeyByFieldName = new Map();
+      if (Array.isArray(existingEq.fields)) {
+        for (const pf of existingEq.fields) {
+          const fk = normKey(pf?.name);
+          const pk = typeof pf?.key === 'string' ? pf.key.trim() : '';
+          if (fk && pk && !prevKeyByFieldName.has(fk)) {
+            prevKeyByFieldName.set(fk, pk);
+          }
+        }
+      }
+
+      // 先保留會被沿用的既有 key，避免新欄位與之衝突
+      const reservedFieldKeys = new Set();
+      for (const f of rawFields) {
+        const fk = normKey(f?.name);
+        if (fk && prevKeyByFieldName.has(fk)) {
+          reservedFieldKeys.add(prevKeyByFieldName.get(fk));
+        }
+      }
+
+      const usedFieldKeys = new Set(reservedFieldKeys);
+      const mergedFields = rawFields.map((f) => {
+        const fieldName = typeof f?.name === 'string' ? f.name.trim() : '';
+        const unit = typeof f?.unit === 'string' ? f.unit.trim() : '';
+        const fk = normKey(fieldName);
+        let key;
+
+        if (fk && prevKeyByFieldName.has(fk)) {
+          key = prevKeyByFieldName.get(fk);
+        } else {
+          const candidate = typeof f?.key === 'string' ? f.key.trim() : '';
+          if (candidate && !usedFieldKeys.has(candidate)) {
+            key = candidate;
+          } else {
+            do {
+              key = makeId('f_');
+            } while (usedFieldKeys.has(key));
+          }
+          usedFieldKeys.add(key);
+        }
+
+        return { key, name: fieldName, unit };
+      });
+
+      toSave.push({
+        id: existingEq.id,
+        name: typeof item.name === 'string' ? item.name.trim() : existingEq.name,
+        bodyParts: normalizeBodyParts(item.bodyParts),
+        instructions:
+          typeof item.instructions === 'string' ? item.instructions : '',
+        trackReps:
+          item.trackReps === undefined || item.trackReps === null
+            ? true
+            : Boolean(item.trackReps),
+        fields: mergedFields,
+        createdAt: existingEq.createdAt || nowIso,
+        updatedAt: nowIso,
+      });
+      updated += 1;
+      continue;
+    }
+
+    // 新器材：若 id 缺漏或與既有 id 衝突則重新產生
+    let id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!id || usedIds.has(id)) {
+      do {
+        id = makeId('eq_');
+      } while (usedIds.has(id));
+    }
+    usedIds.add(id);
+
+    const usedFieldKeys = new Set();
+    const fields = rawFields.map((f) => {
+      const fieldName = typeof f?.name === 'string' ? f.name.trim() : '';
+      const unit = typeof f?.unit === 'string' ? f.unit.trim() : '';
+      let key = typeof f?.key === 'string' ? f.key.trim() : '';
+      if (!key || usedFieldKeys.has(key)) {
+        do {
+          key = makeId('f_');
+        } while (usedFieldKeys.has(key));
+      }
+      usedFieldKeys.add(key);
+      return { key, name: fieldName, unit };
+    });
+
+    const createdAt =
+      typeof item.createdAt === 'string' && item.createdAt.trim()
+        ? item.createdAt.trim()
+        : nowIso;
+    const updatedAt =
+      typeof item.updatedAt === 'string' && item.updatedAt.trim()
+        ? item.updatedAt.trim()
+        : nowIso;
+
+    toSave.push({
+      id,
+      name: item.name.trim(),
+      bodyParts: normalizeBodyParts(item.bodyParts),
+      instructions:
+        typeof item.instructions === 'string' ? item.instructions : '',
+      trackReps:
+        item.trackReps === undefined || item.trackReps === null
+          ? true
+          : Boolean(item.trackReps),
+      fields,
+      createdAt,
+      updatedAt,
+    });
+    added += 1;
+  }
+
+  return { toSave, added, updated, skipped };
 }

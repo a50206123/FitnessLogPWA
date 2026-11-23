@@ -10,6 +10,7 @@ import {
   summarizeLog,
   formatLogSummary,
   formatSet,
+  formatSetLabeled,
   groupByDate,
   groupByEquipment,
   groupByBodyPart,
@@ -280,6 +281,57 @@ describe('formatSet', () => {
 
   it('無自訂欄位時僅顯示次數', () => {
     assert.equal(formatSet({ reps: 15, values: {} }, [], true), '15 下');
+  });
+});
+
+describe('formatSetLabeled', () => {
+  it('跑步機多欄位（含無單位與有單位、trackReps=false）皆附上欄位名稱', () => {
+    const fieldsNoSpdUnit = [
+      { key: 'spd', name: '速度', unit: '' },
+      { key: 'inc', name: '坡度', unit: '' },
+      { key: 'min', name: '時間', unit: '分' },
+    ];
+    assert.equal(
+      formatSetLabeled(
+        { values: { spd: 6, inc: 4, min: 15 } },
+        fieldsNoSpdUnit,
+        false
+      ),
+      '速度 6 · 坡度 4 · 時間 15 分'
+    );
+
+    const fieldsWithSpdUnit = [
+      { key: 'spd', name: '速度', unit: 'km/h' },
+      { key: 'inc', name: '坡度', unit: '' },
+      { key: 'min', name: '時間', unit: '分' },
+    ];
+    assert.equal(
+      formatSetLabeled(
+        { values: { spd: 6, inc: 4, min: 15 } },
+        fieldsWithSpdUnit,
+        false
+      ),
+      '速度 6 km/h · 坡度 4 · 時間 15 分'
+    );
+  });
+
+  it('多欄位且記錄次數時帶欄位名與次數，單欄位計次沿用簡潔格式', () => {
+    const multiFields = [
+      { key: 'w', name: '重量', unit: 'kg' },
+      { key: 'seat', name: '座椅', unit: '格' },
+    ];
+    assert.equal(
+      formatSetLabeled({ reps: 12, values: { w: 40, seat: 4 } }, multiFields, true),
+      '重量 40 kg · 座椅 4 格 × 12 下'
+    );
+
+    const singleField = [{ key: 'w', name: '重量', unit: 'kg' }];
+    assert.equal(
+      formatSetLabeled({ reps: 12, values: { w: 80 } }, singleField, true),
+      '80 kg × 12 下'
+    );
+
+    assert.equal(formatSetLabeled({ reps: 20, values: {} }, [], true), '20 下');
   });
 });
 

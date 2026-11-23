@@ -14,6 +14,9 @@ import {
   formatLogSummary,
   lastLogForEquipment,
   parseFirebaseConfig,
+  buildEquipmentExport,
+  parseEquipmentImport,
+  mergeEquipment,
 } from './logic.js';
 
 import {
@@ -25,12 +28,13 @@ import {
   isDemoForced,
 } from './store.js';
 
+import { renderCalendar } from './calendar.js';
 import { renderHistory } from './history.js';
 import { renderEquipment, openEquipmentEditor } from './equipment.js';
 import { openSharePreview } from './share.js';
 
-const APP_VERSION_LABEL = 'v0.3.0（快取 fitness-v3）';
-const VALID_TABS = new Set(['record', 'history', 'equipment', 'settings']);
+const APP_VERSION_LABEL = 'v0.4.0（快取 fitness-v4）';
+const VALID_TABS = new Set(['calendar', 'history', 'record', 'equipment', 'settings']);
 const VALID_HISTORY_VIEWS = new Set(['date', 'equipment', 'part']);
 
 /** 目前是否為雲端（Firebase）模式 */
@@ -56,17 +60,24 @@ const recordState = {
   note: '',
 };
 
-/** 設定頁草稿狀態（避免重繪時遺失輸入中的 Firebase 設定文字） */
+/** 設定頁草稿狀態（避免重繪時遺失輸入中的 Firebase 設定文字與器材匯入預覽） */
 const settingsState = {
   firebaseText: '',
   initialized: false,
+  eqImportPreview: null,
 };
+
+const initialTodayStr = toDateStr();
 
 /** 共用應用上下文物件（依 SPEC 傳入各分頁模組） */
 export const ctx = {
   data: { equipment: [], logs: [] },
   store: null,
-  view: { historyView: 'date' },
+  view: {
+    historyView: 'date',
+    calMonth: initialTodayStr.slice(0, 7),
+    calSelected: initialTodayStr,
+  },
   rerender: () => renderCurrentTab(),
   toast,
   go,
@@ -243,7 +254,7 @@ export function closeSheet() {
    ========================================================================== */
 
 /**
- * 更新底部按鈕與四個分頁 section 的顯示狀態
+ * 更新底部按鈕與五個分頁 section 的顯示狀態
  * @param {string} tab
  */
 function applyTabUI(tab) {
@@ -282,7 +293,7 @@ function syncHashSilently(hashStr) {
 
 /**
  * 切換分頁並處理可選導覽參數
- * @param {string} tab 分頁名稱（record／history／equipment／settings）
+ * @param {string} tab 分頁名稱（calendar／history／record／equipment／settings）
  * @param {object} [opts={}] 導覽選項（editLogId、equipmentId、date、view、editEquipmentId、fromHash）
  */
 export function go(tab, opts = {}) {
@@ -299,7 +310,14 @@ export function go(tab, opts = {}) {
 
   if (targetTab === 'record') {
     if (opts.date && isValidDateStr(opts.date)) {
-      recordState.date = opts.date;
+      recordState.date = opts.date.trim();
+      if (!opts.editLogId && recordState.editingLogId) {
+        recordState.editingLogId = null;
+        recordState.editingSnapshot = null;
+        recordState.equipmentId = null;
+        recordState.sets = [];
+        recordState.note = '';
+      }
     }
     if (opts.editLogId) {
       loadLogIntoEditor(opts.editLogId);
@@ -327,8 +345,8 @@ export function go(tab, opts = {}) {
     openEquipmentEditor(ctx, opts.editEquipmentId);
   }
 
-  // 若進入紀錄編輯，捲動至表單區；否則回到頂端
-  if (targetTab === 'record' && opts.editLogId) {
+  // 若進入紀錄編輯或指定器材，捲動至表單區；否則回到頂端
+  if (targetTab === 'record' && (opts.editLogId || opts.equipmentId)) {
     const formCard = document.getElementById('recordFormCard');
     if (formCard) {
       formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -341,6 +359,7 @@ export function go(tab, opts = {}) {
 /**
  * 解析網址 hash 並套用對應分頁與動作
  * 支援：
+ * - #tab=calendar（可附 month=YYYY-MM、date=YYYY-MM-DD）
  * - #tab=history&view=equipment（或 date／part）
  * - #tab=record&eq=<equipmentId>
  * - #tab=equipment&edit=<equipmentId>
@@ -358,6 +377,22 @@ function applyHash() {
   const targetTab = VALID_TABS.has(tabParam) ? tabParam : 'record';
 
   pendingHashAction = null;
+
+  if (targetTab === 'calendar') {
+    const monthParam = params.get('month');
+    const dateParam = params.get('date');
+    if (monthParam && /^\d{4}-\d{2}$/.test(monthParam.trim())) {
+      ctx.view.calMonth = monthParam.trim();
+    }
+    if (dateParam && isValidDateStr(dateParam)) {
+      ctx.view.calSelected = dateParam.trim();
+      if (!monthParam) {
+        ctx.view.calMonth = dateParam.trim().slice(0, 7);
+      }
+    }
+    go('calendar', { fromHash: true });
+    return;
+  }
 
   if (targetTab === 'history') {
     const viewParam = params.get('view');
@@ -455,7 +490,9 @@ function renderCurrentTab() {
   const panel = document.getElementById(`tab-${activeTab}`);
   if (!panel) return;
 
-  if (activeTab === 'record') {
+  if (activeTab === 'calendar') {
+    renderCalendar(panel, ctx);
+  } else if (activeTab === 'record') {
     renderRecord(panel);
   } else if (activeTab === 'history') {
     renderHistory(panel, ctx);
@@ -653,50 +690,46 @@ export function renderRecord(container = document.getElementById('tab-record')) 
     </div>
   `);
 
-  // 2. 沒有任何器材時的引導空狀態；有器材時顯示部位篩選與器材格
-  if (equipmentList.length === 0) {
-    partsHtml.push(`
-      <div class="card empty-state stack">
-        <div>目前還沒有建立任何訓練器材。</div>
-        <div class="muted">請先到器材頁新增器材，或前往設定頁載入示範假資料。</div>
-        <div class="stack" style="margin-top:8px">
-          <button type="button" class="btn btn-primary btn-block" data-action="go-equipment">前往器材頁新增</button>
-          <button type="button" class="btn btn-ghost btn-block" data-action="go-settings">前往設定頁載入假資料</button>
+  // 2. 「這天已記錄（N）」清單（含分享鈕，編輯中項目加上 .editing 高亮）
+  const dayLogsHtml =
+    dayLogs.length === 0
+      ? '<div class="card empty-state">這天尚未有訓練紀錄</div>'
+      : `
+        <div class="stack">
+          ${dayLogs
+            .map((log) => {
+              const editingThis = recordState.editingLogId === log.id;
+              return `
+                <button
+                  type="button"
+                  class="log-item${editingThis ? ' editing' : ''}"
+                  data-edit-log-id="${esc(log.id)}"
+                >
+                  <div class="row-between">
+                    <strong>${esc(log.equipmentName || '未命名器材')}</strong>
+                    ${editingThis ? '<span class="tag" style="color:var(--primary)">編輯中</span>' : ''}
+                  </div>
+                  <div class="muted">${esc(formatLogSummary(log))}</div>
+                  ${log.note ? `<div class="card-sub">${esc(log.note)}</div>` : ''}
+                </button>
+              `;
+            })
+            .join('')}
         </div>
-      </div>
-    `);
-  } else {
-    // 部位篩選橫向捲動列（.chips-scroll）
-    const chipsHtml = filterParts
-      .map((part) => {
-        const active = recordState.partFilter === part;
-        return `<button type="button" class="chip${active ? ' active' : ''}" data-part="${esc(part)}">${esc(part)}</button>`;
-      })
-      .join('');
-    partsHtml.push(`<div class="chips-scroll" aria-label="訓練部位篩選">${chipsHtml}</div>`);
+      `;
 
-    // 2 欄器材卡片格（.grid2 .equip-card）
-    const cardsHtml = filteredEquipment
-      .map((eq) => {
-        const isSelected = !isEditing && recordState.equipmentId === eq.id;
-        const lastLog = lastLogForEquipment(logs, eq.id);
-        const lastText = lastLog ? `上次：${formatDateLabel(lastLog.date)}` : '尚未記錄';
-        const tagsHtml = (Array.isArray(eq.bodyParts) ? eq.bodyParts : [])
-          .map((p) => `<span class="tag">${esc(p)}</span>`)
-          .join('');
-        return `
-          <button type="button" class="equip-card${isSelected ? ' active' : ''}" data-eq-id="${esc(eq.id)}">
-            <div class="card-title">${esc(eq.name)}</div>
-            <div class="chips" style="gap:4px">${tagsHtml}</div>
-            <div class="card-sub">${esc(lastText)}</div>
-          </button>
-        `;
-      })
-      .join('');
-    partsHtml.push(`<div class="grid2">${cardsHtml}</div>`);
-  }
+  const shareDayBtnHtml =
+    dayLogs.length > 0
+      ? `<button type="button" class="btn btn-ghost btn-block" data-action="share-day" data-date="${esc(recordState.date)}">📤 分享今日訓練</button>`
+      : '';
 
-  // 3. 選取器材（或載入編輯）後顯示訓練輸入表單
+  partsHtml.push(`
+    <h2 class="section-title">這天已記錄（${dayLogs.length}）</h2>
+    ${shareDayBtnHtml}
+    ${dayLogsHtml}
+  `);
+
+  // 3. 選取器材（或載入編輯）後顯示訓練輸入表單（位於已記錄清單與器材格之間）
   if (activeTarget) {
     const prevPool = isEditing
       ? logs.filter((l) => l.id !== recordState.editingLogId)
@@ -822,45 +855,48 @@ export function renderRecord(container = document.getElementById('tab-record')) 
     `);
   }
 
-  // 4. 下方「這天已記錄」清單（.log-item）
-  const dayLogsHtml =
-    dayLogs.length === 0
-      ? '<div class="card empty-state">這天尚未有訓練紀錄</div>'
-      : `
-        <div class="stack">
-          ${dayLogs
-            .map((log) => {
-              const editingThis = recordState.editingLogId === log.id;
-              return `
-                <button
-                  type="button"
-                  class="log-item"
-                  data-edit-log-id="${esc(log.id)}"
-                  ${editingThis ? 'style="border-color:var(--primary)"' : ''}
-                >
-                  <div class="row-between">
-                    <strong>${esc(log.equipmentName || '未命名器材')}</strong>
-                    ${editingThis ? '<span class="tag" style="color:var(--primary)">編輯中</span>' : ''}
-                  </div>
-                  <div class="muted">${esc(formatLogSummary(log))}</div>
-                  ${log.note ? `<div class="card-sub">${esc(log.note)}</div>` : ''}
-                </button>
-              `;
-            })
-            .join('')}
+  // 4. 沒有任何器材時的引導空狀態；有器材時顯示部位篩選與器材卡片格
+  if (equipmentList.length === 0) {
+    partsHtml.push(`
+      <div class="card empty-state stack">
+        <div>目前還沒有建立任何訓練器材。</div>
+        <div class="muted">請先到器材頁新增器材，或前往設定頁載入示範假資料。</div>
+        <div class="stack" style="margin-top:8px">
+          <button type="button" class="btn btn-primary btn-block" data-action="go-equipment">前往器材頁新增</button>
+          <button type="button" class="btn btn-ghost btn-block" data-action="go-settings">前往設定頁載入假資料</button>
         </div>
-      `;
+      </div>
+    `);
+  } else {
+    // 部位篩選橫向捲動列（.chips-scroll）
+    const chipsHtml = filterParts
+      .map((part) => {
+        const active = recordState.partFilter === part;
+        return `<button type="button" class="chip${active ? ' active' : ''}" data-part="${esc(part)}">${esc(part)}</button>`;
+      })
+      .join('');
+    partsHtml.push(`<div class="chips-scroll" aria-label="訓練部位篩選">${chipsHtml}</div>`);
 
-  const shareDayBtnHtml =
-    dayLogs.length > 0
-      ? `<button type="button" class="btn btn-ghost btn-block" data-action="share-day" data-date="${esc(recordState.date)}">📤 分享今日訓練</button>`
-      : '';
-
-  partsHtml.push(`
-    <h2 class="section-title">這天已記錄（${dayLogs.length}）</h2>
-    ${shareDayBtnHtml}
-    ${dayLogsHtml}
-  `);
+    // 2 欄器材卡片格（.grid2 .equip-card）
+    const cardsHtml = filteredEquipment
+      .map((eq) => {
+        const isSelected = !isEditing && recordState.equipmentId === eq.id;
+        const lastLog = lastLogForEquipment(logs, eq.id);
+        const lastText = lastLog ? `上次：${formatDateLabel(lastLog.date)}` : '尚未記錄';
+        const tagsHtml = (Array.isArray(eq.bodyParts) ? eq.bodyParts : [])
+          .map((p) => `<span class="tag">${esc(p)}</span>`)
+          .join('');
+        return `
+          <button type="button" class="equip-card${isSelected ? ' active' : ''}" data-eq-id="${esc(eq.id)}">
+            <div class="card-title">${esc(eq.name)}</div>
+            <div class="chips" style="gap:4px">${tagsHtml}</div>
+            <div class="card-sub">${esc(lastText)}</div>
+          </button>
+        `;
+      })
+      .join('');
+    partsHtml.push(`<div class="grid2">${cardsHtml}</div>`);
+  }
 
   container.innerHTML = partsHtml.join('');
 
@@ -916,13 +952,17 @@ function bindRecordEvents(container, activeTarget, isEditing) {
     });
   });
 
-  // 選擇器材卡片
+  // 選擇器材卡片（開啟表單後平滑捲動至表單）
   container.querySelectorAll('.equip-card[data-eq-id]').forEach((card) => {
     card.addEventListener('click', () => {
       const eqId = card.dataset.eqId;
       if (!eqId) return;
       selectEquipmentForRecord(eqId);
       renderRecord(container);
+      const formCard = container.querySelector('#recordFormCard');
+      if (formCard) {
+        formCard.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      }
     });
   });
 
@@ -1169,6 +1209,58 @@ export function renderSettings(container = document.getElementById('tab-settings
     `
     : '';
 
+  // 器材匯入預覽卡（選取檔案後顯示）
+  let eqImportPreviewHtml = '';
+  if (settingsState.eqImportPreview) {
+    const preview = settingsState.eqImportPreview;
+    const previewPlan = mergeEquipment(ctx.data.equipment, preview.equipment, 'update');
+    const totalInFile = preview.equipment.length + preview.errors.length;
+    const addedCount = previewPlan.added;
+    const sameNameCount = previewPlan.updated;
+    const dupCount = previewPlan.skipped;
+    const errorCount = preview.errors.length;
+
+    const errSuffix = errorCount > 0 ? `（略過 ${errorCount} 筆格式錯誤）` : '';
+    const dupSuffix = dupCount > 0 ? `，另有 ${dupCount} 筆檔內重複已略過` : '';
+    const summaryText = `檔案內 ${totalInFile} 筆器材：新增 ${addedCount} 筆、同名 ${sameNameCount} 筆${errSuffix}${dupSuffix}`;
+
+    const errorListHtml =
+      errorCount > 0
+        ? `
+          <ul class="stack" style="margin:0;padding-left:20px;gap:4px;color:#fca5a5;font-size:13px">
+            ${preview.errors.map((err) => `<li>${esc(err)}</li>`).join('')}
+          </ul>
+        `
+        : '';
+
+    eqImportPreviewHtml = `
+      <div class="card stack" id="eqImportPreviewCard" style="background-color:var(--bg-elevated);gap:10px">
+        <div class="row-between">
+          <strong>匯入預覽${preview.fileName ? `：${esc(preview.fileName)}` : ''}</strong>
+        </div>
+        <div class="muted">${esc(summaryText)}</div>
+        ${errorListHtml}
+        <div class="stack" style="gap:6px">
+          <div class="field-label" style="margin-bottom:0">同名器材：</div>
+          <div class="row" style="gap:16px;flex-wrap:wrap">
+            <label class="row" style="cursor:pointer">
+              <input type="radio" name="eqImportMode" value="skip"${preview.mode === 'skip' ? ' checked' : ''}>
+              <span>略過</span>
+            </label>
+            <label class="row" style="cursor:pointer">
+              <input type="radio" name="eqImportMode" value="update"${preview.mode === 'update' ? ' checked' : ''}>
+              <span>更新</span>
+            </label>
+          </div>
+        </div>
+        <div class="row">
+          <button type="button" class="btn btn-primary" style="flex:1" data-action="confirm-import-eq"${preview.equipment.length === 0 ? ' disabled' : ''}>確認匯入</button>
+          <button type="button" class="btn btn-ghost" style="flex:1" data-action="cancel-import-eq">取消</button>
+        </div>
+      </div>
+    `;
+  }
+
   container.innerHTML = `
     <div class="card stack">
       <h2 class="card-title">目前模式</h2>
@@ -1192,6 +1284,15 @@ export function renderSettings(container = document.getElementById('tab-settings
         >${esc(settingsState.firebaseText)}</textarea>
       </div>
       <button type="button" class="btn btn-primary btn-block" data-action="save-firebase">儲存並使用雲端</button>
+    </div>
+
+    <div class="card stack">
+      <h2 class="card-title">器材匯出／匯入</h2>
+      <div class="muted">可單獨匯出或匯入器材清單（目前共 ${eqCount} 項器材）；匯入時永不刪除既有器材。</div>
+      <button type="button" class="btn btn-ghost btn-block" data-action="export-eq-json">匯出器材 JSON</button>
+      <input type="file" id="importEqJsonInput" accept="application/json,.json" class="hidden">
+      <button type="button" class="btn btn-ghost btn-block" data-action="import-eq-json">匯入器材 JSON</button>
+      ${eqImportPreviewHtml}
     </div>
 
     <div class="card stack">
@@ -1265,6 +1366,7 @@ function bindSettingsEvents(container) {
     try {
       await ctx.store.signOut();
       resetRecordSelection();
+      settingsState.eqImportPreview = null;
       toast('已登出 Google 帳號');
     } catch (err) {
       toast('登出失敗：' + (err?.message || err), true);
@@ -1294,6 +1396,109 @@ function bindSettingsEvents(container) {
     ctx.store.clearAll();
     resetRecordSelection();
     toast('已清除示範資料');
+  });
+
+  // 匯出器材 JSON
+  container.querySelector('[data-action="export-eq-json"]')?.addEventListener('click', () => {
+    if (!ctx.store) return;
+    try {
+      const exported = ctx.store.exportAll();
+      const eqList = Array.isArray(exported?.equipment) ? exported.equipment : ctx.data.equipment;
+      const payload = buildEquipmentExport(eqList);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: 'application/json;charset=utf-8',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `fitness-equipment-${toDateStr()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast(`已下載器材 JSON（共 ${eqList.length} 項）`);
+    } catch (err) {
+      toast('匯出器材失敗：' + (err?.message || err), true);
+    }
+  });
+
+  // 匯入器材 JSON：選擇檔案並顯示預覽卡
+  const importEqInput = container.querySelector('#importEqJsonInput');
+  container.querySelector('[data-action="import-eq-json"]')?.addEventListener('click', () => {
+    if (isCloudMode && !ctx.store?.user) {
+      toast('請先登入 Google 帳號再匯入器材', true);
+      return;
+    }
+    importEqInput?.click();
+  });
+
+  importEqInput?.addEventListener('change', async () => {
+    const file = importEqInput.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = parseEquipmentImport(text);
+      settingsState.eqImportPreview = {
+        fileName: file.name || '',
+        equipment: Array.isArray(parsed?.equipment) ? parsed.equipment : [],
+        errors: Array.isArray(parsed?.errors) ? parsed.errors : [],
+        mode: 'skip',
+      };
+      renderSettings(container);
+    } catch (err) {
+      toast('讀取器材檔失敗：' + (err?.message || err), true);
+    } finally {
+      importEqInput.value = '';
+    }
+  });
+
+  // 器材匯入預覽：同名器材處理方式（略過／更新）
+  container.querySelectorAll('input[name="eqImportMode"]').forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (settingsState.eqImportPreview && (radio.value === 'skip' || radio.value === 'update')) {
+        settingsState.eqImportPreview.mode = radio.value;
+      }
+    });
+  });
+
+  // 器材匯入預覽：確認匯入（逐筆 saveEquipment 不 await 擋畫面）
+  container.querySelector('[data-action="confirm-import-eq"]')?.addEventListener('click', () => {
+    const preview = settingsState.eqImportPreview;
+    if (!preview) return;
+    if (isCloudMode && !ctx.store?.user) {
+      toast('請先登入 Google 帳號再匯入器材', true);
+      return;
+    }
+
+    const result = mergeEquipment(ctx.data.equipment, preview.equipment, preview.mode);
+    settingsState.eqImportPreview = null;
+
+    let hasError = false;
+    for (const eq of result.toSave) {
+      ctx.store.saveEquipment(eq).catch((err) => {
+        if (!hasError) {
+          hasError = true;
+          toast('匯入器材失敗：' + (err?.message || err), true);
+        }
+      });
+    }
+
+    const summaryParts = [];
+    if (result.added > 0) summaryParts.push(`新增 ${result.added} 筆`);
+    if (result.updated > 0) summaryParts.push(`更新 ${result.updated} 筆`);
+    if (result.skipped > 0) summaryParts.push(`略過 ${result.skipped} 筆`);
+    toast(
+      summaryParts.length > 0
+        ? `已匯入器材（${summaryParts.join('、')}）`
+        : '沒有需要匯入的新器材'
+    );
+    renderSettings(container);
+  });
+
+  // 器材匯入預覽：取消
+  container.querySelector('[data-action="cancel-import-eq"]')?.addEventListener('click', () => {
+    settingsState.eqImportPreview = null;
+    renderSettings(container);
   });
 
   // 匯出 JSON 備份
