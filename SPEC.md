@@ -200,4 +200,5 @@ export const SHARE_METRICS = Object.freeze({
 - **每列組數** `setsPerRowFor(log, mode)`：normal 恆 1；compact：有效欄位 ≤ 1 → 3，否則 1。
 - **planSharePages**：先試 normal 單頁；不行改 compact 單欄；再不行依序分頁（卡片放不下就換頁；單卡比整頁高 → 截斷並「…另 N 組」）。
 - **填滿版面**：每頁算 `scale = clamp(bodyH / 內容高, 1, 1.45)`（內容高 = 所有卡片高 + 間距），卡片的 padY、titleH、rowH、noteLineH 與 gap 都乘 scale，回傳的 y/h 已是放大後數值；頁面物件加 `scale` 欄位，share.js 字級也乘同一 scale。最後一頁內容少時同樣放大（上限 1.45），剩餘空白留在卡片下方、底部「健身記錄」固定在最下方。
+- **v0.4.2 起取消自動放大**：scale 固定 1；字級 normal 器材名 44px／組內容 34px／組次 28px／備註 28px，compact 器材名 40px／組內容 32px／組次 28px／備註 28px；列高 normal titleH 58、rowH 46，compact titleH 54、rowH 44；內容少時卡片由上往下排、下方留白。
 - 頁面回傳：`{ pageNo, total, hasSummary, bodyTop, bodyH, scale, cards: [{ logIndex, x, y, w, h, rowsShown, totalRows, hiddenSets, setsPerRow }] }`。

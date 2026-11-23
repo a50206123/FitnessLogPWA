@@ -930,30 +930,31 @@ export const SHARE_METRICS = Object.freeze({
   tagGap: 14,
   statsH: 150,
   cardioH: 56,
+  // v0.4.2：器材名 44px／組內容 34px（normal）、40px／32px（compact），列高依固定字級計算容量
   normal: Object.freeze({
     cols: 1,
-    padY: 28,
-    titleH: 64,
-    rowH: 58,
-    noteLineH: 46,
+    padY: 22,
+    titleH: 58,
+    rowH: 46,
+    noteLineH: 38,
     noteMaxLines: 2,
-    noteCharsPerLine: 26,
+    noteCharsPerLine: 30,
     setsPerRow: 1,
   }),
   compact: Object.freeze({
     cols: 1,
-    padY: 22,
-    titleH: 56,
-    rowH: 50,
-    noteLineH: 40,
+    padY: 20,
+    titleH: 54,
+    rowH: 44,
+    noteLineH: 38,
     noteMaxLines: 1,
-    noteCharsPerLine: 12,
+    noteCharsPerLine: 30,
     setsPerRow: 2,
   }),
 });
 
-/** 分享圖每頁內容自動放大的最大倍率 */
-const SHARE_SCALE_MAX = 1.45;
+/** 分享圖每頁內容放大的最大倍率（v0.4.2 起取消自動放大，固定 1 倍字級；內容少時卡片由上往下排、下方留白） */
+const SHARE_SCALE_MAX = 1;
 
 /**
  * 判斷單組欄位值或次數是否為空值

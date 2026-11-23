@@ -133,22 +133,22 @@ describe('SHARE_METRICS', () => {
     assert.equal(SHARE_METRICS.cardioH, 56);
     assert.deepEqual(SHARE_METRICS.normal, {
       cols: 1,
-      padY: 28,
-      titleH: 64,
-      rowH: 58,
-      noteLineH: 46,
+      padY: 22,
+      titleH: 58,
+      rowH: 46,
+      noteLineH: 38,
       noteMaxLines: 2,
-      noteCharsPerLine: 26,
+      noteCharsPerLine: 30,
       setsPerRow: 1,
     });
     assert.deepEqual(SHARE_METRICS.compact, {
       cols: 1,
-      padY: 22,
-      titleH: 56,
-      rowH: 50,
-      noteLineH: 40,
+      padY: 20,
+      titleH: 54,
+      rowH: 44,
+      noteLineH: 38,
       noteMaxLines: 1,
-      noteCharsPerLine: 12,
+      noteCharsPerLine: 30,
       setsPerRow: 2,
     });
     assert.ok(Object.isFrozen(SHARE_METRICS));
@@ -455,7 +455,7 @@ describe('planSharePages', () => {
     assertPlanGeometry(plan);
   });
 
-  it('少量紀錄的頁 scale > 1（上限 1.45）、y/h 已放大且最後一張卡 y+h ≤ bodyTop+bodyH', () => {
+  it('少量紀錄不自動放大（scale 固定 1）、卡片由上往下排且最後一張卡 y+h ≤ bodyTop+bodyH', () => {
     const logs = [
       makeLog(0, { equipmentName: '胸推機', setCount: 3 }),
       makeLog(1, { equipmentName: '蝴蝶機', setCount: 3 }),
@@ -468,7 +468,7 @@ describe('planSharePages', () => {
     const page = plan.pages[0];
     assert.equal(page.total, 1);
     assert.equal(page.hasSummary, true);
-    assert.ok(page.scale > 1 && page.scale <= 1.45, `scale (${page.scale}) 應 > 1 且 ≤ 1.45`);
+    assert.equal(page.scale, 1, '取消自動放大後 scale 應固定為 1');
     assert.equal(page.cards.length, 2);
     assert.deepEqual(
       page.cards.map((c) => c.logIndex),
@@ -500,7 +500,7 @@ describe('planSharePages', () => {
     assertPlanGeometry(plan);
   });
 
-  it('中等紀錄在 normal 單頁內依 bodyH/內容高 動態放大（1 < scale < 1.45）', () => {
+  it('中等紀錄在 normal 單頁內維持固定字級（scale 為 1）、下方可留白', () => {
     const logs = [
       makeLog(0, { setCount: 4 }),
       makeLog(1, { setCount: 4 }),
@@ -512,7 +512,9 @@ describe('planSharePages', () => {
     assert.equal(plan.mode, 'normal');
     assert.equal(plan.pages.length, 1);
     const page = plan.pages[0];
-    assert.ok(page.scale > 1 && page.scale < 1.45, `scale (${page.scale}) 應介於 1 與 1.45 之間`);
+    assert.equal(page.scale, 1);
+    // 內容少時留白：卡片總高小於可用高度
+    assert.ok(page.cards[page.cards.length - 1].y + page.cards[page.cards.length - 1].h < page.bodyTop + page.bodyH);
     const lastCard = page.cards[page.cards.length - 1];
     assert.ok(lastCard.y + lastCard.h <= page.bodyTop + page.bodyH);
     assertPlanGeometry(plan);

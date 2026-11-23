@@ -26,7 +26,7 @@ for (const n of [10, 12, 16, 20, 30]) {
     assert.ok(counts[counts.length - 1] >= 2, `最後一頁張數 ${counts}`);
     assert.ok(Math.max(...counts) - Math.min(...counts) <= 3, `張數 ${counts}`);
     for (const p of pages) {
-      assert.ok(p.scale >= 1 && p.scale <= 1.45);
+      assert.equal(p.scale, 1);
       for (const c of p.cards) {
         assert.equal(c.x, SHARE_METRICS.pad);
         assert.equal(c.w, SHARE_METRICS.width - 2 * SHARE_METRICS.pad);

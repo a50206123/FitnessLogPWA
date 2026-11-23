@@ -835,7 +835,7 @@ function drawNormalCard(ctx, log, card, m, scale) {
   ctx.fillStyle = COLORS.accent;
   ctx.fill();
 
-  ctx.font = makeFont(scaleFont(28, scale), 800);
+  ctx.font = makeFont(scaleFont(26, scale), 800);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = COLORS.accentDarkText;
@@ -845,7 +845,7 @@ function drawNormalCard(ctx, log, card, m, scale) {
   const unitHeaderRaw = String(cardUnitHeader(log) ?? '').trim();
   let unitHeaderW = 0;
   if (unitHeaderRaw) {
-    ctx.font = makeFont(scaleFont(30, scale), 500);
+    ctx.font = makeFont(scaleFont(26, scale), 500);
     const unitHeaderText = truncateText(
       ctx,
       unitHeaderRaw,
@@ -862,7 +862,7 @@ function drawNormalCard(ctx, log, card, m, scale) {
   const nameX = card.x + padX + circleRadius * 2 + Math.round(18 * scale);
   const nameMaxW = Math.max(80, cardRight - (unitHeaderW ? unitHeaderW + 18 : 0) - nameX);
   const equipName = String(log?.equipmentName || '未命名器材').trim();
-  ctx.font = makeFont(scaleFont(52, scale), 700);
+  ctx.font = makeFont(scaleFont(40, scale), 700);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = COLORS.textPrimary;
@@ -876,9 +876,9 @@ function drawNormalCard(ctx, log, card, m, scale) {
 
   // 2. 各組明細（組次＋formatSetLabeled 42px×scale＋右側 kg 單組小計）
   const shownCount = resolveShownSetCount(sets.length, card);
-  const setLabelFontSize = scaleFont(34, scale);
-  const setContentFontSize = scaleFont(42, scale);
-  const subtotalFontSize = scaleFont(32, scale);
+  const setLabelFontSize = scaleFont(28, scale);
+  const setContentFontSize = scaleFont(34, scale);
+  const subtotalFontSize = scaleFont(26, scale);
 
   // 依最大組次動態計算組次欄寬，確保放大時不與組數文字重疊
   let setLabelColW = Math.round(136 * scale);
@@ -931,7 +931,7 @@ function drawNormalCard(ctx, log, card, m, scale) {
   // 若有截斷組數，保留一列顯示「…另 N 組」
   if (card.hiddenSets > 0) {
     const rowCy = cursorY + rowH / 2;
-    ctx.font = makeFont(scaleFont(36, scale), 600);
+    ctx.font = makeFont(scaleFont(30, scale), 600);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textMuted;
@@ -941,7 +941,7 @@ function drawNormalCard(ctx, log, card, m, scale) {
 
   // 3. 備註（基準 32px × scale，超出可用行數以「…」截斷）
   if (noteText) {
-    ctx.font = makeFont(scaleFont(32, scale), 400);
+    ctx.font = makeFont(scaleFont(28, scale), 400);
     const maxLines = resolveAvailableNoteLines(
       card.y + card.h - padY,
       cursorY,
@@ -1003,7 +1003,7 @@ function drawCompactCard(ctx, log, card, m, scale) {
   const unitHeaderRaw = String(cardUnitHeader(log) ?? '').trim();
   let unitHeaderW = 0;
   if (unitHeaderRaw) {
-    ctx.font = makeFont(scaleFont(28, scale), 500);
+    ctx.font = makeFont(scaleFont(26, scale), 500);
     const unitHeaderText = truncateText(
       ctx,
       unitHeaderRaw,
@@ -1020,7 +1020,7 @@ function drawCompactCard(ctx, log, card, m, scale) {
   const nameX = card.x + padX + circleRadius * 2 + Math.round(16 * scale);
   const nameMaxW = Math.max(80, cardRight - (unitHeaderW ? unitHeaderW + 16 : 0) - nameX);
   const equipName = String(log?.equipmentName || '未命名器材').trim();
-  ctx.font = makeFont(scaleFont(44, scale), 700);
+  ctx.font = makeFont(scaleFont(40, scale), 700);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = COLORS.textPrimary;
@@ -1041,8 +1041,8 @@ function drawCompactCard(ctx, log, card, m, scale) {
   const colGap = 16;
   const cellW = perRow > 1 ? (innerW - colGap * (perRow - 1)) / perRow : innerW;
   const rowCount = Math.ceil(shownCount / perRow);
-  const indexFontSize = scaleFont(32, scale);
-  const setFontSize = scaleFont(36, scale);
+  const indexFontSize = scaleFont(28, scale);
+  const setFontSize = scaleFont(32, scale);
 
   for (let r = 0; r < rowCount; r++) {
     const rowCy = cursorY + rowH / 2;
@@ -1075,7 +1075,7 @@ function drawCompactCard(ctx, log, card, m, scale) {
   // 若有截斷組數，保留一列顯示「…另 N 組」
   if (card.hiddenSets > 0) {
     const rowCy = cursorY + rowH / 2;
-    ctx.font = makeFont(scaleFont(34, scale), 600);
+    ctx.font = makeFont(scaleFont(30, scale), 600);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COLORS.textMuted;
@@ -1085,7 +1085,7 @@ function drawCompactCard(ctx, log, card, m, scale) {
 
   // 3. 備註（基準 30px × scale，超出可用行數以「…」截斷）
   if (noteText) {
-    ctx.font = makeFont(scaleFont(30, scale), 400);
+    ctx.font = makeFont(scaleFont(28, scale), 400);
     const maxLines = resolveAvailableNoteLines(
       card.y + card.h - padY,
       cursorY,
