@@ -12,8 +12,8 @@ import {
 } from './logic.js';
 import { openSharePreview } from './share.js';
 
-/** 週一至週日的表頭文字 */
-const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
+/** 週日至週六的表頭文字（週日開始） */
+const WEEKDAY_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
 
 /** 記錄已綁定委派事件的容器與最新 ctx，避免重複綁定與閉包過期 */
 const boundContainers = new WeakMap();

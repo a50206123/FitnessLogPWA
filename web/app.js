@@ -33,7 +33,7 @@ import { renderHistory } from './history.js';
 import { renderEquipment, openEquipmentEditor } from './equipment.js';
 import { openSharePreview } from './share.js';
 
-const APP_VERSION_LABEL = 'v0.4.0（快取 fitness-v4）';
+const APP_VERSION_LABEL = 'v0.4.1（快取 fitness-v5）';
 const VALID_TABS = new Set(['calendar', 'history', 'record', 'equipment', 'settings']);
 const VALID_HISTORY_VIEWS = new Set(['date', 'equipment', 'part']);
 

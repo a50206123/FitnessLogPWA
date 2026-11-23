@@ -1650,8 +1650,8 @@ export function buildMonthGrid(year, month, logs = [], todayStr = toDateStr()) {
   const firstDay = new Date(year, month - 1, 1);
   const daysInMonth = new Date(year, month, 0).getDate();
 
-  // 以週一為每週第一天（週一=0、週二=1、…、週日=6）
-  const startOffset = (firstDay.getDay() + 6) % 7;
+  // 以週日為每週第一天（週日=0、週一=1、…、週六=6）；歷史頁「本週」另有自己的算法，不受影響
+  const startOffset = firstDay.getDay();
   const weekCount = Math.ceil((startOffset + daysInMonth) / 7);
 
   const weeks = [];

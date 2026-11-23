@@ -160,13 +160,13 @@ export const SHARE_METRICS = Object.freeze({
 - 記錄鈕 `.tab-btn.tab-fab`：直徑約 64px 圓形、主色 #22c55e 底、深色圖示、向上凸出選單列約 22px、陰影與外圈（與選單底色同色的 4~6px 邊框形成弧形缺口感），active 時仍保持凸出；文字「記錄」在圓下方。啟動預設分頁仍是 record。
 ### 2. 月曆（web/calendar.js，`export function renderCalendar(container, ctx)`）
 - 狀態：`ctx.view.calMonth`（'YYYY-MM'，預設今天所在月）、`ctx.view.calSelected`（'YYYY-MM-DD'，預設今天）。改完呼叫 `ctx.rerender()`。
-- 上方：「‹」「2026 年 11 月」「›」與「今天」鈕。週一開始，表頭「一 二 三 四 五 六 日」。
+- 上方：「‹」「2026 年 11 月」「›」與「今天」鈕。週日開始，表頭「日 一 二 三 四 五 六」（v0.4.1 起）。
 - 格子：用 logic.js `buildMonthGrid`；非本月日期淡化；今天外框高亮；有紀錄的日期顯示主色圓點（count ≥ 3 顯示較大或兩個點）與底色淡綠；選取日實心主色。格子至少 44px 高。
 - 月曆下方「本月 N 天有訓練」。點某天 → calSelected，下方列出該天紀錄 `.log-item`（器材名、部位 .tag、formatLogSummary），點紀錄 → `ctx.go('record', { editLogId })`；底部按鈕「在這天新增紀錄」→ `ctx.go('record', { date })`；該天有紀錄時另加「📤 分享這天訓練」→ share.js 的 `openSharePreview(ctx, date)`。
 ### 3. logic.js 新增
 - `logDateIndex(logs)` → `{ 'YYYY-MM-DD': { count, bodyParts: [...不重複，依 BODY_PARTS 順序] } }`
 - `shiftMonth(year, month, delta)` → `{ year, month }`（month 1~12，跨年正確）
-- `buildMonthGrid(year, month, logs, todayStr = toDateStr())` → `{ year, month, label: '2026 年 11 月', weeks: [ [ { date, day, inMonth, isToday, count, bodyParts } ×7 ] ... ] }`，週一開始，補齊前後月份使每週 7 格（4~6 週）。
+- `buildMonthGrid(year, month, logs, todayStr = toDateStr())` → `{ year, month, label: '2026 年 11 月', weeks: [ [ { date, day, inMonth, isToday, count, bodyParts } ×7 ] ... ] }`，週日開始（v0.4.1 起），補齊前後月份使每週 7 格（4~6 週）。
 - `buildEquipmentExport(equipment, now = new Date())` → `{ app: 'fitness-log', type: 'equipment', version: 1, exportedAt: ISO, equipment: [...] }`
 - `parseEquipmentImport(text)` → `{ equipment: [...], errors: ['第 3 筆：器材名稱必填', ...] }`。接受：上面的匯出格式、純陣列、或完整備份 `{ equipment, logs }`。JSON 錯誤或找不到器材陣列 → 丟出 Error（正體中文）。每筆用 validateEquipment 驗證，不合格者略過並記錄錯誤；欄位缺 key 補 makeId('f_')；bodyParts 字串轉陣列；trackReps 預設 true。
 - `mergeEquipment(existing, incoming, mode = 'skip', now = new Date())` → `{ toSave: [...], added, updated, skipped }`。以名稱比對（去空白、不分大小寫）。同名：mode 'skip' 略過；'update' 保留既有 id、createdAt，其他用匯入值，且同名詳細項目沿用既有 key（避免歷史對不上），updatedAt = now。新器材：id 若與既有 id 衝突則改 makeId('eq_')，補 createdAt/updatedAt。匯入檔內重複同名只取第一筆（其餘算 skipped）。**永不刪除既有器材**。
