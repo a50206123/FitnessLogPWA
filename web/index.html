@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="健身記錄">
+  <title>健身記錄</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- 頂部導覽列：顯示 App 名稱與目前模式 -->
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="app-title">健身記錄</h1>
+      <span id="modeBadge" class="badge" aria-live="polite">示範模式</span>
+    </div>
+  </header>
+
+  <!-- 主要內容區：四個分頁容器（由 app.js 動態渲染） -->
+  <main class="main" id="appMain">
+    <section id="tab-record" class="tab-panel" data-tab-panel="record" aria-label="記錄"></section>
+    <section id="tab-history" class="tab-panel hidden" data-tab-panel="history" aria-label="歷史"></section>
+    <section id="tab-equipment" class="tab-panel hidden" data-tab-panel="equipment" aria-label="器材"></section>
+    <section id="tab-settings" class="tab-panel hidden" data-tab-panel="settings" aria-label="設定"></section>
+  </main>
+
+  <!-- 底部固定分頁列 -->
+  <nav class="tabbar" aria-label="主要功能分頁">
+    <div class="tabbar-inner">
+      <button type="button" class="tab-btn active" data-tab="record" aria-current="page">
+        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 5v14M5 12h14"/>
+          <rect x="3" y="3" width="18" height="18" rx="4"/>
+        </svg>
+        <span class="tab-label">記錄</span>
+      </button>
+
+      <button type="button" class="tab-btn" data-tab="history">
+        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/>
+          <polyline points="12 7 12 12 15.5 14"/>
+        </svg>
+        <span class="tab-label">歷史</span>
+      </button>
+
+      <button type="button" class="tab-btn" data-tab="equipment">
+        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6.5 6.5v11M17.5 6.5v11M3 9v6M21 9v6M6.5 12h11"/>
+        </svg>
+        <span class="tab-label">器材</span>
+      </button>
+
+      <button type="button" class="tab-btn" data-tab="settings">
+        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        <span class="tab-label">設定</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- 全螢幕滑入面板容器（供器材新增／編輯表單使用） -->
+  <div id="sheet" class="sheet hidden" role="dialog" aria-modal="true" aria-label="編輯面板"></div>
+
+  <!-- 輕量提示訊息（Toast） -->
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <!-- 主程式模組 -->
+  <script type="module" src="app.js"></script>
+</body>
+</html>
