@@ -32,8 +32,10 @@ import { renderCalendar } from './calendar.js';
 import { renderHistory } from './history.js';
 import { renderEquipment, openEquipmentEditor } from './equipment.js';
 import { openSharePreview } from './share.js';
+import { blankSet, resolveLogView, migrateLegacyLogs } from './equipment-link.js';
+import { openLogEditor } from './log-editor.js';
 
-const APP_VERSION_LABEL = 'v0.4.2（快取 fitness-v6）';
+const APP_VERSION_LABEL = 'v0.4.3（快取 fitness-v7）';
 const VALID_TABS = new Set(['calendar', 'history', 'record', 'equipment', 'settings']);
 const VALID_HISTORY_VIEWS = new Set(['date', 'equipment', 'part']);
 
@@ -46,16 +48,22 @@ let activeTab = 'record';
 /** Toast 自動隱藏計時器 */
 let toastTimer = null;
 
+/** 目前開啟小視窗（Modal）的關閉回呼與識別序號 */
+let currentModalOnClose = null;
+let modalTokenSeq = 0;
+let activeModalToken = 0;
+
+/** 已執行過一次性舊紀錄 equipmentId 遷移的紀錄 ID 集合（防止重複寫回迴圈） */
+const migratedLogIds = new Set();
+
 /** 雲端模式初始化完成前尚未載入資料時，暫存的 Hash 深連結動作 */
 let pendingHashAction = null;
 
-/** 記錄頁 UI 狀態 */
+/** 記錄頁 UI 狀態（表單僅用於新增紀錄） */
 const recordState = {
   date: toDateStr(),
   partFilter: '全部',
   equipmentId: null,
-  editingLogId: null,
-  editingSnapshot: null,
   sets: [],
   note: '',
 };
@@ -71,7 +79,7 @@ const initialTodayStr = toDateStr();
 
 /** 共用應用上下文物件（依 SPEC 傳入各分頁模組） */
 export const ctx = {
-  data: { equipment: [], logs: [] },
+  data: { equipment: [], logs: [], rawLogs: [] },
   store: null,
   view: {
     historyView: 'date',
@@ -83,6 +91,8 @@ export const ctx = {
   go,
   openSheet,
   closeSheet,
+  openModal,
+  closeModal,
   confirm: (msg) => window.confirm(msg),
   esc,
 };
@@ -249,6 +259,111 @@ export function closeSheet() {
   document.body.style.overflow = '';
 }
 
+/**
+ * 打開居中彈出小視窗（#modal），不改變目前分頁與捲動位置
+ * @param {string} title 視窗標題
+ * @param {Node | string | null} bodyEl 主內容元素或 HTML 字串
+ * @param {Node | string | null} [footerEl=null] 底部操作列元素或 HTML 字串
+ * @param {{ onClose?: () => void } | null} [opts={}] 選項（onClose 關閉回呼）
+ * @returns {() => void} 關閉此小視窗的函式
+ */
+export function openModal(title, bodyEl, footerEl = null, opts = {}) {
+  const modal = document.getElementById('modal');
+  if (!modal) return () => {};
+
+  const token = ++modalTokenSeq;
+  activeModalToken = token;
+  currentModalOnClose = typeof opts?.onClose === 'function' ? opts.onClose : null;
+
+  modal.innerHTML = '';
+
+  // 小視窗主卡片容器（.modal-card）
+  const card = document.createElement('div');
+  card.className = 'modal-card';
+
+  // 標題列（.modal-header：.modal-title 與關閉鈕 ✕）
+  const header = document.createElement('div');
+  header.className = 'modal-header';
+
+  const titleEl = document.createElement('h2');
+  titleEl.className = 'modal-title';
+  titleEl.textContent = title || '';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'btn btn-ghost btn-icon';
+  closeBtn.setAttribute('aria-label', '關閉視窗');
+  closeBtn.textContent = '✕';
+  closeBtn.addEventListener('click', () => closeModal());
+
+  header.append(titleEl, closeBtn);
+  card.appendChild(header);
+
+  // 主體內容區（.modal-body）
+  const body = document.createElement('div');
+  body.className = 'modal-body';
+  if (bodyEl instanceof Node) {
+    body.appendChild(bodyEl);
+  } else if (typeof bodyEl === 'string') {
+    body.innerHTML = bodyEl;
+  }
+  card.appendChild(body);
+
+  // 底部按鈕列（.modal-footer，選填）
+  if (footerEl) {
+    const footer = document.createElement('div');
+    footer.className = 'modal-footer';
+    if (footerEl instanceof Node) {
+      footer.appendChild(footerEl);
+    } else if (typeof footerEl === 'string') {
+      footer.innerHTML = footerEl;
+    }
+    card.appendChild(footer);
+  }
+
+  modal.appendChild(card);
+
+  // 點擊半透明背景遮罩關閉小視窗
+  modal.onclick = (e) => {
+    if (e.target === modal) {
+      closeModal();
+    }
+  };
+
+  modal.classList.remove('hidden');
+  document.body.classList.add('modal-open');
+
+  return () => {
+    if (activeModalToken === token) {
+      closeModal();
+    }
+  };
+}
+
+/**
+ * 關閉居中彈出小視窗（#modal），還原背景捲動並呼叫 onClose 回呼
+ */
+export function closeModal() {
+  const modal = document.getElementById('modal');
+  const isOpen = Boolean(modal && !modal.classList.contains('hidden'));
+  const onClose = currentModalOnClose;
+
+  currentModalOnClose = null;
+  activeModalToken = 0;
+
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.innerHTML = '';
+    modal.onclick = null;
+  }
+
+  document.body.classList.remove('modal-open');
+
+  if (isOpen && typeof onClose === 'function') {
+    onClose();
+  }
+}
+
 /* ==========================================================================
    分頁切換與 Hash 路由
    ========================================================================== */
@@ -299,7 +414,16 @@ function syncHashSilently(hashStr) {
 export function go(tab, opts = {}) {
   const targetTab = VALID_TABS.has(tab) ? tab : 'record';
 
-  // 切換分頁時先關閉可能開啟的編輯面板
+  // 若透過程式呼叫編輯既有紀錄（非初始 Hash 載入），直接在目前分頁開小視窗，不切換畫面與捲動位置
+  if (targetTab === 'record' && opts.editLogId && !opts.fromHash) {
+    openLogEditor(ctx, opts.editLogId);
+    return;
+  }
+
+  // 切換分頁時先關閉可能開啟的小視窗與編輯面板
+  if (!opts.keepModal) {
+    closeModal();
+  }
   if (!opts.keepSheet) {
     closeSheet();
   }
@@ -311,17 +435,8 @@ export function go(tab, opts = {}) {
   if (targetTab === 'record') {
     if (opts.date && isValidDateStr(opts.date)) {
       recordState.date = opts.date.trim();
-      if (!opts.editLogId && recordState.editingLogId) {
-        recordState.editingLogId = null;
-        recordState.editingSnapshot = null;
-        recordState.equipmentId = null;
-        recordState.sets = [];
-        recordState.note = '';
-      }
     }
-    if (opts.editLogId) {
-      loadLogIntoEditor(opts.editLogId);
-    } else if (opts.equipmentId) {
+    if (!opts.editLogId && opts.equipmentId) {
       selectEquipmentForRecord(opts.equipmentId);
     }
   }
@@ -341,12 +456,14 @@ export function go(tab, opts = {}) {
 
   renderCurrentTab();
 
-  if (targetTab === 'equipment' && opts.editEquipmentId) {
+  if (targetTab === 'record' && opts.editLogId) {
+    openLogEditor(ctx, opts.editLogId);
+  } else if (targetTab === 'equipment' && opts.editEquipmentId) {
     openEquipmentEditor(ctx, opts.editEquipmentId);
   }
 
-  // 若進入紀錄編輯或指定器材，捲動至表單區；否則回到頂端
-  if (targetTab === 'record' && (opts.editLogId || opts.equipmentId)) {
+  // 若指定器材進入新增表單，捲動至表單區；否則回到頂端
+  if (targetTab === 'record' && opts.equipmentId && !opts.editLogId) {
     const formCard = document.getElementById('recordFormCard');
     if (formCard) {
       formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -475,10 +592,7 @@ function flushPendingHashAction() {
   } else if (action.type === 'record-edit') {
     if (ctx.data.logs.some((l) => l.id === action.id)) {
       pendingHashAction = null;
-      if (activeTab === 'record') {
-        loadLogIntoEditor(action.id);
-        renderRecord();
-      }
+      openLogEditor(ctx, action.id);
     }
   }
 }
@@ -508,60 +622,26 @@ function renderCurrentTab() {
    ========================================================================== */
 
 /**
- * 選取器材進入新增記錄狀態：若有上次紀錄則帶入上次各組的值，否則建立一組空白
+ * 選取器材進入新增記錄狀態：初始為一組空白（不再自動帶入上次數值）
  * @param {string} eqId
  */
 function selectEquipmentForRecord(eqId) {
   const eq = ctx.data.equipment.find((item) => item.id === eqId);
   if (!eq) return;
 
-  recordState.editingLogId = null;
-  recordState.editingSnapshot = null;
+  const fields = Array.isArray(eq.fields) ? eq.fields : [];
+  const trackReps = eq.trackReps !== false;
   recordState.equipmentId = eq.id;
   recordState.note = '';
-
-  const fields = Array.isArray(eq.fields) ? eq.fields : [];
-  const lastLog = lastLogForEquipment(ctx.data.logs, eq.id);
-  if (lastLog && Array.isArray(lastLog.sets) && lastLog.sets.length > 0) {
-    recordState.sets = lastLog.sets.map((s) => newSetFrom(s, fields));
-  } else {
-    recordState.sets = [newSetFrom(null, fields)];
-  }
+  recordState.sets = [blankSet(fields, trackReps)];
 }
 
 /**
- * 將既有訓練紀錄載入記錄頁表單（編輯模式）
- * @param {string} logId
- * @returns {boolean}
- */
-function loadLogIntoEditor(logId) {
-  const log = ctx.data.logs.find((item) => item.id === logId);
-  if (!log) {
-    toast('找不到指定的訓練紀錄', true);
-    return false;
-  }
-
-  const fields = Array.isArray(log.fields) ? log.fields : [];
-  recordState.date = isValidDateStr(log.date) ? log.date : toDateStr();
-  recordState.editingLogId = log.id;
-  recordState.editingSnapshot = structuredClone(log);
-  recordState.equipmentId = log.equipmentId || null;
-  recordState.sets =
-    Array.isArray(log.sets) && log.sets.length > 0
-      ? log.sets.map((s) => newSetFrom(s, fields))
-      : [newSetFrom(null, fields)];
-  recordState.note = log.note || '';
-  return true;
-}
-
-/**
- * 重設記錄頁選取與編輯狀態（例如清除示範資料或載入假資料後）
+ * 重設記錄頁選取狀態（例如清除示範資料或載入假資料後）
  */
 function resetRecordSelection() {
   recordState.partFilter = '全部';
   recordState.equipmentId = null;
-  recordState.editingLogId = null;
-  recordState.editingSnapshot = null;
   recordState.sets = [];
   recordState.note = '';
 }
@@ -594,26 +674,10 @@ function getFilterBodyParts(equipmentList) {
 }
 
 /**
- * 取得記錄表單目前操作的器材定義（編輯模式優先採用紀錄快照以保留歷史欄位）
+ * 取得記錄頁新增表單目前選取的器材定義
  * @returns {{ id: string, name: string, bodyParts: string[], instructions: string, trackReps: boolean, fields: Array<object> } | null}
  */
 function getActiveRecordTarget() {
-  if (recordState.editingLogId) {
-    const liveLog = ctx.data.logs.find((l) => l.id === recordState.editingLogId);
-    const snap = liveLog || recordState.editingSnapshot;
-    if (!snap) return null;
-    const liveEq = ctx.data.equipment.find((e) => e.id === snap.equipmentId);
-    return {
-      id: snap.equipmentId || '',
-      name: snap.equipmentName || liveEq?.name || '未命名器材',
-      bodyParts: Array.isArray(snap.bodyParts) ? snap.bodyParts : liveEq?.bodyParts || [],
-      instructions: liveEq?.instructions || '',
-      trackReps: snap.trackReps !== false,
-      fields: Array.isArray(snap.fields) ? snap.fields : [],
-      existingLog: snap,
-    };
-  }
-
   if (!recordState.equipmentId) return null;
   const eq = ctx.data.equipment.find((e) => e.id === recordState.equipmentId);
   if (!eq) {
@@ -631,7 +695,6 @@ function getActiveRecordTarget() {
     instructions: eq.instructions || '',
     trackReps: eq.trackReps !== false,
     fields: Array.isArray(eq.fields) ? eq.fields : [],
-    existingLog: null,
   };
 }
 
@@ -660,7 +723,6 @@ export function renderRecord(container = document.getElementById('tab-record')) 
         );
 
   const activeTarget = getActiveRecordTarget();
-  const isEditing = Boolean(recordState.editingLogId && activeTarget?.existingLog);
 
   // 取得當日已記錄清單（依建立時間由舊到新排序）
   const dayLogs = logs
@@ -690,30 +752,28 @@ export function renderRecord(container = document.getElementById('tab-record')) 
     </div>
   `);
 
-  // 2. 「這天已記錄（N）」清單（含分享鈕，編輯中項目加上 .editing 高亮）
+  // 2. 「這天已記錄（N）」清單（含分享鈕；點擊項目開啟修改紀錄小視窗）
   const dayLogsHtml =
     dayLogs.length === 0
       ? '<div class="card empty-state">這天尚未有訓練紀錄</div>'
       : `
         <div class="stack">
           ${dayLogs
-            .map((log) => {
-              const editingThis = recordState.editingLogId === log.id;
-              return `
+            .map(
+              (log) => `
                 <button
                   type="button"
-                  class="log-item${editingThis ? ' editing' : ''}"
+                  class="log-item"
                   data-edit-log-id="${esc(log.id)}"
                 >
                   <div class="row-between">
                     <strong>${esc(log.equipmentName || '未命名器材')}</strong>
-                    ${editingThis ? '<span class="tag" style="color:var(--primary)">編輯中</span>' : ''}
                   </div>
                   <div class="muted">${esc(formatLogSummary(log))}</div>
                   ${log.note ? `<div class="card-sub">${esc(log.note)}</div>` : ''}
                 </button>
-              `;
-            })
+              `
+            )
             .join('')}
         </div>
       `;
@@ -729,12 +789,9 @@ export function renderRecord(container = document.getElementById('tab-record')) 
     ${dayLogsHtml}
   `);
 
-  // 3. 選取器材（或載入編輯）後顯示訓練輸入表單（位於已記錄清單與器材格之間）
+  // 3. 選取器材後顯示新增訓練紀錄表單（位於已記錄清單與器材格之間）
   if (activeTarget) {
-    const prevPool = isEditing
-      ? logs.filter((l) => l.id !== recordState.editingLogId)
-      : logs;
-    const prevLog = lastLogForEquipment(prevPool, activeTarget.id);
+    const prevLog = lastLogForEquipment(logs, activeTarget.id);
     const prevSummaryHtml = prevLog
       ? `上次：${esc(formatDateLabel(prevLog.date))} · ${esc(formatLogSummary(prevLog))}`
       : '上次：尚無紀錄';
@@ -806,16 +863,6 @@ export function renderRecord(container = document.getElementById('tab-record')) 
       })
       .join('');
 
-    const actionsHtml = isEditing
-      ? `
-        <button type="button" class="btn btn-primary btn-block" data-action="save-log">更新紀錄</button>
-        <div class="row">
-          <button type="button" class="btn btn-danger" style="flex:1" data-action="delete-log">刪除</button>
-          <button type="button" class="btn btn-ghost" style="flex:1" data-action="cancel-edit">取消編輯</button>
-        </div>
-      `
-      : `<button type="button" class="btn btn-primary btn-block" data-action="save-log">儲存紀錄</button>`;
-
     partsHtml.push(`
       <div id="recordFormCard" class="card stack">
         <div class="row-between">
@@ -823,7 +870,6 @@ export function renderRecord(container = document.getElementById('tab-record')) 
             <div class="card-title">${esc(activeTarget.name)}</div>
             <div class="chips" style="gap:4px;margin-top:4px">${eqTagsHtml}</div>
           </div>
-          ${isEditing ? '<span class="badge" style="border-color:var(--warning);color:var(--warning)">編輯中</span>' : ''}
         </div>
 
         <details>
@@ -837,7 +883,10 @@ export function renderRecord(container = document.getElementById('tab-record')) 
           ${setsRowsHtml || '<div class="muted" style="text-align:center;padding:8px 0">目前沒有組數，請點下方按鈕新增一組</div>'}
         </div>
 
-        <button type="button" class="btn btn-ghost btn-block" data-action="add-set">＋ 新增一組（沿用上一組）</button>
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          <button type="button" class="btn btn-ghost" style="flex:1" data-action="add-set">＋ 新增一組（空白）</button>
+          <button type="button" class="btn btn-ghost" style="flex:0 0 auto;white-space:nowrap" data-action="copy-prev-set"${recordState.sets.length === 0 ? ' disabled' : ''}>複製上一組</button>
+        </div>
 
         <div>
           <label class="field-label" for="recordNoteInput">備註</label>
@@ -849,7 +898,7 @@ export function renderRecord(container = document.getElementById('tab-record')) 
         </div>
 
         <div class="stack" style="gap:8px">
-          ${actionsHtml}
+          <button type="button" class="btn btn-primary btn-block" data-action="save-log">儲存紀錄</button>
         </div>
       </div>
     `);
@@ -880,7 +929,7 @@ export function renderRecord(container = document.getElementById('tab-record')) 
     // 2 欄器材卡片格（.grid2 .equip-card）
     const cardsHtml = filteredEquipment
       .map((eq) => {
-        const isSelected = !isEditing && recordState.equipmentId === eq.id;
+        const isSelected = recordState.equipmentId === eq.id;
         const lastLog = lastLogForEquipment(logs, eq.id);
         const lastText = lastLog ? `上次：${formatDateLabel(lastLog.date)}` : '尚未記錄';
         const tagsHtml = (Array.isArray(eq.bodyParts) ? eq.bodyParts : [])
@@ -901,16 +950,15 @@ export function renderRecord(container = document.getElementById('tab-record')) 
   container.innerHTML = partsHtml.join('');
 
   // 綁定記錄頁事件
-  bindRecordEvents(container, activeTarget, isEditing);
+  bindRecordEvents(container, activeTarget);
 }
 
 /**
  * 綁定記錄頁內互動事件（輸入欄位僅更新記憶體狀態，不重繪整頁）
  * @param {HTMLElement} container
  * @param {object | null} activeTarget
- * @param {boolean} isEditing
  */
-function bindRecordEvents(container, activeTarget, isEditing) {
+function bindRecordEvents(container, activeTarget) {
   // 日期輸入框變更
   const dateInput = container.querySelector('#recordDateInput');
   if (dateInput) {
@@ -996,8 +1044,15 @@ function bindRecordEvents(container, activeTarget, isEditing) {
     });
   }
 
-  // 新增一組（沿用上一組）
+  // 新增一組（空白）
   container.querySelector('[data-action="add-set"]')?.addEventListener('click', () => {
+    if (!activeTarget) return;
+    recordState.sets.push(blankSet(activeTarget.fields, activeTarget.trackReps));
+    renderRecord(container);
+  });
+
+  // 複製上一組（沿用上一組數值）
+  container.querySelector('[data-action="copy-prev-set"]')?.addEventListener('click', () => {
     if (!activeTarget) return;
     const prev =
       recordState.sets.length > 0 ? recordState.sets[recordState.sets.length - 1] : null;
@@ -1013,7 +1068,7 @@ function bindRecordEvents(container, activeTarget, isEditing) {
     });
   }
 
-  // 儲存／更新訓練紀錄
+  // 儲存新訓練紀錄
   container.querySelector('[data-action="save-log"]')?.addEventListener('click', () => {
     if (!activeTarget) return;
 
@@ -1028,33 +1083,26 @@ function bindRecordEvents(container, activeTarget, isEditing) {
       return;
     }
 
-    const logPayload = isEditing
-      ? {
-          ...activeTarget.existingLog,
-          date: recordState.date,
-          sets: cleaned,
-          note: recordState.note.trim(),
-        }
-      : {
-          id: makeId('log_'),
-          date: recordState.date,
-          equipmentId: activeTarget.id,
-          equipmentName: activeTarget.name,
-          bodyParts: [...activeTarget.bodyParts],
-          trackReps: activeTarget.trackReps,
-          fields: activeTarget.fields.map((f) => ({ ...f })),
-          sets: cleaned,
-          note: recordState.note.trim(),
-        };
+    const logPayload = {
+      id: makeId('log_'),
+      date: recordState.date,
+      equipmentId: activeTarget.id,
+      equipmentName: activeTarget.name,
+      bodyParts: [...activeTarget.bodyParts],
+      trackReps: activeTarget.trackReps,
+      fields: activeTarget.fields.map((f) => ({ ...f })),
+      sets: cleaned,
+      note: recordState.note.trim(),
+    };
 
-    // 清空表單但保留日期與目前器材（若為編輯模式則退出編輯）
+    // 清空表單並保留日期與目前器材（重設為一組空白）
     const keepEq = ctx.data.equipment.find((e) => e.id === activeTarget.id);
-    recordState.editingLogId = null;
-    recordState.editingSnapshot = null;
     recordState.note = '';
     if (keepEq) {
+      const keepFields = Array.isArray(keepEq.fields) ? keepEq.fields : [];
+      const keepTrackReps = keepEq.trackReps !== false;
       recordState.equipmentId = keepEq.id;
-      recordState.sets = [newSetFrom(null, Array.isArray(keepEq.fields) ? keepEq.fields : [])];
+      recordState.sets = [blankSet(keepFields, keepTrackReps)];
     } else {
       recordState.equipmentId = null;
       recordState.sets = [];
@@ -1064,50 +1112,7 @@ function bindRecordEvents(container, activeTarget, isEditing) {
     ctx.store.saveLog(logPayload).catch((err) => {
       toast('儲存失敗：' + (err?.message || err), true);
     });
-    toast(isEditing ? '已更新紀錄' : '已儲存');
-    renderRecord(container);
-  });
-
-  // 編輯模式：刪除紀錄
-  container.querySelector('[data-action="delete-log"]')?.addEventListener('click', () => {
-    if (!isEditing || !recordState.editingLogId) return;
-    if (isCloudMode && !ctx.store?.user) {
-      toast('請先前往設定頁登入 Google 帳號', true);
-      return;
-    }
-    if (!ctx.confirm('確定要刪除這筆訓練紀錄嗎？')) return;
-
-    const targetId = recordState.editingLogId;
-    const keepEq = ctx.data.equipment.find((e) => e.id === recordState.equipmentId);
-    recordState.editingLogId = null;
-    recordState.editingSnapshot = null;
-    recordState.note = '';
-    if (keepEq) {
-      recordState.sets = [newSetFrom(null, Array.isArray(keepEq.fields) ? keepEq.fields : [])];
-    } else {
-      recordState.equipmentId = null;
-      recordState.sets = [];
-    }
-
-    ctx.store.deleteLog(targetId).catch((err) => {
-      toast('刪除失敗：' + (err?.message || err), true);
-    });
-    toast('已刪除紀錄');
-    renderRecord(container);
-  });
-
-  // 編輯模式：取消編輯
-  container.querySelector('[data-action="cancel-edit"]')?.addEventListener('click', () => {
-    const keepEqId = recordState.equipmentId;
-    recordState.editingLogId = null;
-    recordState.editingSnapshot = null;
-    recordState.note = '';
-    if (keepEqId && ctx.data.equipment.some((e) => e.id === keepEqId)) {
-      selectEquipmentForRecord(keepEqId);
-    } else {
-      recordState.equipmentId = null;
-      recordState.sets = [];
-    }
+    toast('已儲存');
     renderRecord(container);
   });
 
@@ -1123,18 +1128,12 @@ function bindRecordEvents(container, activeTarget, isEditing) {
     });
   }
 
-  // 點擊「這天已記錄」列載入編輯
+  // 點擊「這天已記錄」列開啟修改紀錄小視窗
   container.querySelectorAll('.log-item[data-edit-log-id]').forEach((item) => {
     item.addEventListener('click', () => {
       const logId = item.dataset.editLogId;
       if (!logId) return;
-      if (loadLogIntoEditor(logId)) {
-        renderRecord(container);
-        const formCard = container.querySelector('#recordFormCard');
-        if (formCard) {
-          formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }
-      }
+      openLogEditor(ctx, logId);
     });
   });
 }
@@ -1365,6 +1364,7 @@ function bindSettingsEvents(container) {
     if (!ctx.store || typeof ctx.store.signOut !== 'function') return;
     try {
       await ctx.store.signOut();
+      migratedLogIds.clear();
       resetRecordSelection();
       settingsState.eqImportPreview = null;
       toast('已登出 Google 帳號');
@@ -1384,6 +1384,7 @@ function bindSettingsEvents(container) {
   container.querySelector('[data-action="load-demo"]')?.addEventListener('click', () => {
     if (!ctx.store || typeof ctx.store.loadDemoData !== 'function') return;
     if (!ctx.confirm('載入假資料將覆蓋目前的示範器材與訓練紀錄，確定要繼續嗎？')) return;
+    migratedLogIds.clear();
     ctx.store.loadDemoData();
     resetRecordSelection();
     toast('已載入示範假資料');
@@ -1393,6 +1394,7 @@ function bindSettingsEvents(container) {
   container.querySelector('[data-action="clear-demo"]')?.addEventListener('click', () => {
     if (!ctx.store || typeof ctx.store.clearAll !== 'function') return;
     if (!ctx.confirm('確定要清除全部示範器材與訓練紀錄嗎？此操作無法復原。')) return;
+    migratedLogIds.clear();
     ctx.store.clearAll();
     resetRecordSelection();
     toast('已清除示範資料');
@@ -1579,9 +1581,14 @@ export async function initApp() {
     });
   });
 
-  // 支援 Esc 鍵關閉全螢幕面板
+  // 支援 Esc 鍵關閉小視窗或全螢幕面板（優先關閉上層小視窗）
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      const modal = document.getElementById('modal');
+      if (modal && !modal.classList.contains('hidden')) {
+        closeModal();
+        return;
+      }
       const sheet = document.getElementById('sheet');
       if (sheet && !sheet.classList.contains('hidden')) {
         closeSheet();
@@ -1618,12 +1625,37 @@ export async function initApp() {
     });
   }
 
-  // 訂閱資料變動並重繪目前分頁
+  // 訂閱資料變動：保存原始 rawLogs、解析顯示用 logs、一次性遷移舊紀錄並重繪目前分頁
   ctx.store.subscribe((data) => {
+    const equipment = Array.isArray(data?.equipment) ? data.equipment : [];
+    const rawLogs = Array.isArray(data?.logs) ? data.logs : [];
+    const logs = rawLogs.map((log) => resolveLogView(log, equipment));
+
     ctx.data = {
-      equipment: Array.isArray(data?.equipment) ? data.equipment : [],
-      logs: Array.isArray(data?.logs) ? data.logs : [],
+      equipment,
+      rawLogs,
+      logs,
     };
+
+    // 一次性補齊舊紀錄缺少或失效的 equipmentId（以 Set 防止重複寫回造成迴圈）
+    if (equipment.length > 0 && rawLogs.length > 0 && (!isCloudMode || ctx.store?.user)) {
+      const toMigrate = migrateLegacyLogs(rawLogs, equipment).filter(
+        (log) => log?.id && !migratedLogIds.has(log.id)
+      );
+      if (toMigrate.length > 0) {
+        for (const log of toMigrate) {
+          migratedLogIds.add(log.id);
+        }
+        queueMicrotask(() => {
+          for (const log of toMigrate) {
+            ctx.store?.saveLog(log).catch((err) => {
+              console.warn('遷移舊紀錄 equipmentId 失敗：', err);
+            });
+          }
+        });
+      }
+    }
+
     flushPendingHashAction();
     renderCurrentTab();
   });

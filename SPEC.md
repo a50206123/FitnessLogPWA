@@ -202,3 +202,40 @@ export const SHARE_METRICS = Object.freeze({
 - **填滿版面**：每頁算 `scale = clamp(bodyH / 內容高, 1, 1.45)`（內容高 = 所有卡片高 + 間距），卡片的 padY、titleH、rowH、noteLineH 與 gap 都乘 scale，回傳的 y/h 已是放大後數值；頁面物件加 `scale` 欄位，share.js 字級也乘同一 scale。最後一頁內容少時同樣放大（上限 1.45），剩餘空白留在卡片下方、底部「健身記錄」固定在最下方。
 - **v0.4.2 起取消自動放大**：scale 固定 1；字級 normal 器材名 44px／組內容 34px／組次 28px／備註 28px，compact 器材名 40px／組內容 32px／組次 28px／備註 28px；列高 normal titleH 58、rowH 46，compact titleH 54、rowH 44；內容少時卡片由上往下排、下方留白。
 - 頁面回傳：`{ pageNo, total, hasSummary, bodyTop, bodyH, scale, cards: [{ logIndex, x, y, w, h, rowsShown, totalRows, hiddenSets, setsPerRow }] }`。
+
+## v0.4.3（快取 fitness-v7）：編輯改用小視窗、新增空白組、器材變更連動舊紀錄
+### A. 新檔 web/equipment-link.js（純函式，不碰 DOM／localStorage；tests/equipment-link.test.js）
+- `blankSet(fields, trackReps = true)` → `{ reps: '', values: { 每個 field.key: '' } }`（trackReps=false 時不含 reps）。
+- `normName(s)`：去頭尾空白、轉小寫，用於名稱比對。
+- `findEquipmentForLog(log, equipmentList)`：先用 `log.equipmentId` 找；找不到再用 `normName(log.equipmentName)` 找同名器材；都沒有回 null。
+- `resolveLogView(log, equipmentList)`：回傳新物件（不改原物件），供畫面顯示：
+  - 找得到器材 → `equipmentId`、`equipmentName`、`bodyParts` 用器材目前值；`fields` = 器材目前 fields ＋「紀錄裡有、器材已沒有、但該紀錄任一組有值」的舊欄位（附 `orphan: true`）；`trackReps` = 器材 trackReps，或紀錄任一組有 reps 數值時為 true。
+  - 找不到器材 → 原樣（沿用快照）。
+  - 加 `_resolved: true`。
+- `migrateLegacyLogs(logs, equipmentList)` → 需要補 `equipmentId` 的紀錄陣列（沒有 equipmentId 或 equipmentId 找不到、但名稱對得到器材者），回傳已補好 equipmentId 的新物件；其餘不回傳。
+- `diffEquipment(oldEq, newEq)` → `{ nameChanged, renamedFields: [{ key, from, to }], unitChanged: [{ key, name, fromUnit, toUnit }], removedFields: [{ key, name, unit }], addedFields: [...], repsTurnedOff: boolean }`（欄位以 key 比對；editor 對既有欄位保留原 key）。
+- `findEquipmentConflicts(oldEq, newEq, logs)`：只看屬於此器材的紀錄（findEquipmentForLog 以 oldEq 比對：equipmentId === oldEq.id，或無 id 且同名）。逐筆紀錄、逐欄位產生衝突：
+  - `type: 'removed'`：被刪除的欄位在該紀錄任一組有值。可選動作 `keep`（保留在該筆紀錄，以舊欄位顯示）、`map`（搬到新器材的另一個欄位）、`delete`（刪除這些值）。預設 `keep`。
+  - `type: 'unit'`：欄位單位改變且該紀錄有值。可選 `keep`（值不變、改用新單位顯示）、`map`、`delete`。預設 `keep`。
+  - `type: 'reps'`：記錄次數被關閉且該紀錄有 reps。可選 `keep`、`delete`。預設 `keep`。
+  - 每筆衝突：`{ id: logId + ':' + (fieldKey 或 '__reps'), logId, date, logNo（該器材紀錄依日期＋createdAt 由舊到新的序號，從 1 起）, fieldKey, fieldName, fromUnit, toUnit, values: [{ setNo, value }], actions: [...], defaultAction }`。依 date、logNo 排序。
+- `applyEquipmentChange(oldEq, newEq, logs, resolutions = {}, now = new Date())` → 需要寫回的紀錄陣列（新物件）。對屬於此器材的每筆紀錄：
+  - 設 `equipmentId = newEq.id`、`equipmentName`、`bodyParts`、`trackReps` 為新值；`fields` = newEq.fields ＋ 被 keep 的已刪除欄位定義。
+  - 依 resolutions[conflict.id]（`{ action, targetKey? }`，缺省用 defaultAction）處理：`delete` 刪除該欄位各組的值（reps 則設為 ''）；`map` 把值搬到 targetKey——目標該組為空才搬，目標已有值則保留原值不覆蓋並把來源當 orphan 保留；`keep` 不動值。
+  - 沒有任何變更的紀錄不回傳；回傳的紀錄 `updatedAt = now.toISOString()`。
+- 規則：名稱連動靠 equipmentId（舊資料只有名稱時先用名稱對應並遷移補 id）；欄位改名／改單位靠欄位 key 不變自動連動。
+### B. 小視窗 modal（index.html 加 `<div id="modal" class="modal hidden" role="dialog" aria-modal="true"></div>`；styles.css）
+- `.modal`：固定全螢幕半透明背景（z-index 高於 #sheet 與底部選單），內含 `.modal-card`（寬 min(92vw, 520px)、最高 86vh、圓角 20、可內部捲動）、`.modal-header`（`.modal-title`＋關閉鈕 ✕）、`.modal-body`、`.modal-footer`（按鈕並排、黏在卡片底部）。手機友善大按鈕。
+- app.js 在 ctx 提供 `openModal(title, bodyEl, footerEl, { onClose } = {})` 回傳 close 函式、`closeModal()`；點背景或 ✕ 關閉（呼叫 onClose）；開啟時鎖住 body 捲動，關閉後還原，**不改變目前分頁與捲動位置**。
+### C. 新檔 web/log-editor.js：`export function openLogEditor(ctx, logId)`
+- 從 `ctx.data.logs`（已 resolve 的顯示用紀錄）找該筆；找不到 toast。用 ctx.openModal 顯示：標題「修改紀錄」、器材名稱與部位（唯讀）、日期 input、各組列（沿用 `.set-row` 樣式；每個欄位 input inputmode=decimal＋單位；trackReps 時次數欄；orphan 欄位顯示「（舊欄位）」標籤；刪除鈕）、兩顆鈕「＋ 新增一組（空白）」（blankSet）與「複製上一組」（newSetFrom）、備註、footer「儲存」「取消」與「刪除這筆」。
+- 輸入不重繪整個 modal（狀態存閉包）；增刪組只重繪組列表區。
+- 儲存：用 logic.js 的 cleanSets，至少一組；寫入 `{ ...原紀錄, date, sets, note, equipmentId, equipmentName, bodyParts, trackReps, fields（去掉 orphan 標記但保留有值的舊欄位）, updatedAt }` → `ctx.store.saveLog(...).catch(...)`（不 await 擋畫面），toast「已更新」，關閉 modal。刪除：ctx.confirm 後 deleteLog。取消：直接關閉。全部完成後停留在原畫面。
+### D. 套用到畫面
+- app.js：`store.subscribe` 收到資料後 `ctx.data.rawLogs = 原始 logs`、`ctx.data.logs = rawLogs.map(l => resolveLogView(l, equipment))`；同時 `migrateLegacyLogs` 有結果就逐筆 `store.saveLog`（只做一次，避免迴圈：用一個 Set 記住已遷移的 id）。
+- 記錄頁「這天已記錄」、歷史、月曆的紀錄點擊一律改呼叫 `openLogEditor(ctx, logId)`，不再跳頁；`go('record', { editLogId })` 也改成開 modal。記錄頁表單只用於「新增」紀錄（移除頁內編輯模式，或保留但不再由清單觸發）。
+- 記錄頁新增表單：「＋ 新增一組（空白）」用 blankSet；另加「複製上一組」。選器材時的初始組：一組空白（不再自動帶入上次的數值；上次紀錄摘要仍顯示在表單上方供參考）。
+- equipment.js 編輯既有器材按「儲存」：先 `findEquipmentConflicts(old, new, ctx.data.rawLogs)`：
+  - 有衝突 → ctx.openModal「確認受影響的紀錄」：說明變更摘要（名稱 A→B、欄位改名、單位 kg→lb、刪除欄位…），逐項列出「日期 · 第 N 筆 · 欄位（舊單位→新單位）· 原值：第1組 40、第2組 45」，每項一個 `<select>`：保留／對應到「欄位名（單位）」…／刪除；上方「全部保留」「全部刪除」快速鍵；footer「確認並更新」「返回修改」。確認 → applyEquipmentChange(…, resolutions) → saveEquipment ＋ 逐筆 saveLog → 關 modal 與 sheet → toast「已更新器材，連動 N 筆紀錄」。
+  - 無衝突 → 直接 applyEquipmentChange（處理改名等連動）並寫回。新器材照舊。
+- sw.js：CACHE 'fitness-v7'，APP_SHELL 加 './equipment-link.js'、'./log-editor.js'。設定頁版本 'v0.4.3（快取 fitness-v7）'。

@@ -3,7 +3,17 @@
  * 負責器材清單顯示、部位篩選，以及透過全螢幕面板新增／編輯／刪除器材。
  */
 
-import { BODY_PARTS, makeId, validateEquipment } from './logic.js';
+import {
+  BODY_PARTS,
+  formatDateLabel,
+  makeId,
+  validateEquipment,
+} from './logic.js';
+import {
+  applyEquipmentChange,
+  diffEquipment,
+  findEquipmentConflicts,
+} from './equipment-link.js';
 
 /** 篩選列的「全部」選項常數 */
 const ALL_PART = '全部';
@@ -570,21 +580,92 @@ export function openEquipmentEditor(ctx, equipmentId = null) {
     state.errors = [];
     renderErrors();
 
-    const now = new Date().toISOString();
+    const nowDate = new Date();
+    const nowIso = nowDate.toISOString();
     const record = {
       ...candidate,
       id: existing ? existing.id : makeId('eq_'),
-      createdAt: existing?.createdAt || now,
-      updatedAt: now,
+      createdAt: existing?.createdAt || nowIso,
+      updatedAt: nowIso,
     };
 
-    // 寫入不 await 擋畫面，失敗時再以 toast 提示
-    Promise.resolve(ctx.store.saveEquipment(record)).catch((err) => {
-      ctx.toast('儲存失敗：' + (err?.message || err));
-    });
+    // 新增器材流程不變：直接儲存、關閉面板並提示
+    if (!isEdit) {
+      // 寫入不 await 擋畫面，失敗時再以 toast 提示
+      Promise.resolve(ctx.store.saveEquipment(record)).catch((err) => {
+        ctx.toast('儲存失敗：' + (err?.message || err));
+      });
 
-    ctx.closeSheet();
-    ctx.toast('已儲存');
+      ctx.closeSheet();
+      ctx.toast('已儲存');
+      return;
+    }
+
+    // 編輯既有器材：依原始紀錄檢查衝突並連動更新歷史紀錄
+    const rawLogs = Array.isArray(ctx?.data?.rawLogs)
+      ? ctx.data.rawLogs
+      : Array.isArray(ctx?.data?.logs)
+        ? ctx.data.logs
+        : [];
+
+    /**
+     * 套用器材變更並寫回器材與受連動的歷史紀錄（不 await 擋畫面）
+     * @param {Record<string, { action: string, targetKey?: string }>} resolutions
+     * @param {boolean} fromModal 是否由衝突確認視窗觸發
+     */
+    const commitEquipmentUpdate = (resolutions = {}, fromModal = false) => {
+      const commitNow = new Date();
+      const finalRecord = {
+        ...record,
+        updatedAt: commitNow.toISOString(),
+      };
+      const updatedLogs = applyEquipmentChange(
+        existing,
+        finalRecord,
+        rawLogs,
+        resolutions,
+        commitNow
+      );
+      const logsToSave = Array.isArray(updatedLogs) ? updatedLogs : [];
+
+      Promise.resolve(ctx.store.saveEquipment(finalRecord)).catch((err) => {
+        ctx.toast('儲存失敗：' + (err?.message || err));
+      });
+
+      for (const log of logsToSave) {
+        Promise.resolve(ctx.store.saveLog(log)).catch((err) => {
+          ctx.toast('更新紀錄失敗：' + (err?.message || err));
+        });
+      }
+
+      if (fromModal && typeof ctx.closeModal === 'function') {
+        ctx.closeModal();
+      }
+      ctx.closeSheet();
+
+      if (logsToSave.length > 0) {
+        ctx.toast(`已更新器材，連動 ${logsToSave.length} 筆紀錄`);
+      } else {
+        ctx.toast('已儲存');
+      }
+    };
+
+    const conflicts = findEquipmentConflicts(existing, record, rawLogs);
+    if (!Array.isArray(conflicts) || conflicts.length === 0) {
+      commitEquipmentUpdate({}, false);
+      return;
+    }
+
+    const diff = diffEquipment(existing, record);
+    openEquipmentConflictModal(ctx, {
+      oldEq: existing,
+      newEq: record,
+      diff,
+      conflicts,
+      onConfirm: (resolutions) => {
+        commitEquipmentUpdate(resolutions, true);
+      },
+    });
   });
 
   if (isEdit) {
@@ -603,4 +684,262 @@ export function openEquipmentEditor(ctx, equipmentId = null) {
   }
 
   ctx.openSheet(isEdit ? '編輯器材' : '新增器材', bodyEl, footerEl);
+}
+
+/**
+ * 將 diffEquipment 結果轉為正體中文變更摘要項目陣列
+ * @param {object} oldEq 修改前器材
+ * @param {object} newEq 修改後器材
+ * @param {object} diff diffEquipment 回傳物件
+ * @returns {string[]}
+ */
+function buildDiffSummaryItems(oldEq, newEq, diff) {
+  const items = [];
+  if (diff?.nameChanged) {
+    items.push(`名稱：「${oldEq?.name || ''}」→「${newEq?.name || ''}」`);
+  }
+  for (const field of diff?.renamedFields || []) {
+    items.push(`欄位改名：「${field.from || ''}」→「${field.to || ''}」`);
+  }
+  for (const field of diff?.unitChanged || []) {
+    const fromUnit = field.fromUnit || '無單位';
+    const toUnit = field.toUnit || '無單位';
+    items.push(`單位變更：${field.name || ''}（${fromUnit} → ${toUnit}）`);
+  }
+  for (const field of diff?.removedFields || []) {
+    const unitText = field.unit ? `（${field.unit}）` : '';
+    items.push(`刪除欄位：${field.name || ''}${unitText}`);
+  }
+  for (const field of diff?.addedFields || []) {
+    const unitText = field.unit ? `（${field.unit}）` : '';
+    items.push(`新增欄位：${field.name || ''}${unitText}`);
+  }
+  if (diff?.repsTurnedOff) {
+    items.push('關閉「記錄次數」');
+  }
+  return items;
+}
+
+/**
+ * 格式化單筆衝突標題文字（日期 · 第 N 筆 · 欄位變更說明）
+ * @param {object} conflict
+ * @returns {string}
+ */
+function formatConflictHeadline(conflict) {
+  const dateText = conflict?.date ? formatDateLabel(conflict.date) : '未知日期';
+  const parts = [dateText];
+  if (conflict?.logNo != null) {
+    parts.push(`第 ${conflict.logNo} 筆`);
+  }
+  if (conflict?.type === 'reps') {
+    parts.push('次數（已關閉記錄次數）');
+  } else if (conflict?.type === 'unit') {
+    const fromUnit = conflict.fromUnit || '無單位';
+    const toUnit = conflict.toUnit || '無單位';
+    parts.push(`${conflict.fieldName || '未命名欄位'}（${fromUnit}→${toUnit}）`);
+  } else if (conflict?.type === 'removed') {
+    const unitText = conflict.fromUnit ? `（${conflict.fromUnit}）` : '';
+    parts.push(`${conflict.fieldName || '未命名欄位'}${unitText}（已刪除）`);
+  } else {
+    parts.push(conflict?.fieldName || '欄位變更');
+  }
+  return parts.join(' · ');
+}
+
+/**
+ * 格式化衝突紀錄的原值摘要，例如「第1組 40、第2組 45」
+ * @param {object} conflict
+ * @returns {string}
+ */
+function formatConflictValues(conflict) {
+  const values = Array.isArray(conflict?.values) ? conflict.values : [];
+  if (values.length === 0) return '—';
+  return values.map((v) => `第${v.setNo}組 ${v.value}`).join('、');
+}
+
+/**
+ * 產生單筆衝突下拉選單的選項 HTML
+ * @param {object} conflict 衝突物件
+ * @param {Array<object>} newFields 新器材的詳細項目陣列
+ * @param {string} selectedValue 預設選取值
+ * @param {(v: unknown) => string} esc HTML 跳脫函式
+ * @returns {string}
+ */
+function buildConflictOptionsHtml(conflict, newFields, selectedValue, esc) {
+  const options = [];
+  const allowedActions = Array.isArray(conflict?.actions)
+    ? conflict.actions
+    : null;
+
+  if (!allowedActions || allowedActions.includes('keep')) {
+    options.push({ value: 'keep', label: '保留' });
+  }
+
+  // type 為 reps 時不提供對應到其他欄位；其餘列出新器材的其他欄位
+  const allowMap =
+    conflict?.type !== 'reps' &&
+    (!allowedActions || allowedActions.includes('map'));
+  if (allowMap) {
+    for (const field of newFields) {
+      if (!field || !field.key || field.key === conflict.fieldKey) continue;
+      const fieldLabel = field.unit
+        ? `${field.name}（${field.unit}）`
+        : field.name;
+      options.push({
+        value: `map:${field.key}`,
+        label: `對應到「${fieldLabel}」`,
+      });
+    }
+  }
+
+  if (!allowedActions || allowedActions.includes('delete')) {
+    options.push({ value: 'delete', label: '刪除' });
+  }
+
+  return options
+    .map(
+      (opt) =>
+        `<option value="${esc(opt.value)}"${opt.value === selectedValue ? ' selected' : ''}>${esc(opt.label)}</option>`
+    )
+    .join('');
+}
+
+/**
+ * 開啟「確認受影響的紀錄」小視窗，供使用者逐項決定受影響歷史紀錄的處理方式
+ * @param {object} ctx 共用上下文物件
+ * @param {{ oldEq: object, newEq: object, diff: object, conflicts: Array<object>, onConfirm: (resolutions: Record<string, object>) => void }} opts
+ */
+function openEquipmentConflictModal(ctx, { oldEq, newEq, diff, conflicts, onConfirm }) {
+  const esc = (val) => ctx.esc(String(val ?? ''));
+  const newFields = Array.isArray(newEq?.fields) ? newEq.fields : [];
+
+  // 依每筆衝突的 defaultAction 建立初始處理方案表
+  const resolutions = {};
+  for (const conflict of conflicts) {
+    const defAction =
+      conflict?.defaultAction === 'delete' ? 'delete' : 'keep';
+    resolutions[conflict.id] = { action: defAction };
+  }
+
+  const summaryItems = buildDiffSummaryItems(oldEq, newEq, diff);
+  const summaryHtml =
+    summaryItems.length > 0
+      ? `
+        <div class="card stack" style="gap:6px;">
+          <div style="font-weight:700;font-size:14px;">變更摘要</div>
+          <ul style="margin:0;padding-left:20px;font-size:14px;color:var(--text-secondary);">
+            ${summaryItems.map((line) => `<li>${esc(line)}</li>`).join('')}
+          </ul>
+        </div>
+      `
+      : '';
+
+  const itemsHtml = conflicts
+    .map((conflict) => {
+      const headline = formatConflictHeadline(conflict);
+      const valuesText = formatConflictValues(conflict);
+      const selectedVal = resolutions[conflict.id]?.action || 'keep';
+      const optionsHtml = buildConflictOptionsHtml(
+        conflict,
+        newFields,
+        selectedVal,
+        esc
+      );
+
+      return `
+        <div class="conflict-item stack" data-conflict-id="${esc(conflict.id)}">
+          <div style="font-weight:700;font-size:14px;">${esc(headline)}</div>
+          <div class="muted" style="font-size:13px;">原值：${esc(valuesText)}</div>
+          <select data-conflict-select="${esc(conflict.id)}" aria-label="${esc(headline)}處理方式">
+            ${optionsHtml}
+          </select>
+        </div>
+      `;
+    })
+    .join('');
+
+  const modalBody = document.createElement('div');
+  modalBody.className = 'stack';
+  modalBody.innerHTML = `
+    ${summaryHtml}
+    <div class="muted" style="font-size:14px;">
+      以下 ${conflicts.length} 項歷史紀錄欄位受此次變更影響，請選擇每項的處理方式：
+    </div>
+    <div id="conflictBulkActions" class="row">
+      <button type="button" class="btn btn-ghost" data-bulk-action="keep" style="flex:1;">全部保留</button>
+      <button type="button" class="btn btn-danger" data-bulk-action="delete" style="flex:1;">全部刪除</button>
+    </div>
+    <div id="conflictList" class="conflict-list stack">
+      ${itemsHtml}
+    </div>
+  `;
+
+  const bulkBar = modalBody.querySelector('#conflictBulkActions');
+  const conflictListEl = modalBody.querySelector('#conflictList');
+
+  // 監聽各筆處理方式下拉選單變更
+  conflictListEl.addEventListener('change', (event) => {
+    const select = event.target.closest('select[data-conflict-select]');
+    if (!select) return;
+    const conflictId = select.getAttribute('data-conflict-select');
+    if (!conflictId) return;
+    const val = select.value;
+    if (val.startsWith('map:')) {
+      resolutions[conflictId] = { action: 'map', targetKey: val.slice(4) };
+    } else if (val === 'delete') {
+      resolutions[conflictId] = { action: 'delete' };
+    } else {
+      resolutions[conflictId] = { action: 'keep' };
+    }
+  });
+
+  // 全部保留／全部刪除快速鍵
+  bulkBar.addEventListener('click', (event) => {
+    const btn = event.target.closest('button[data-bulk-action]');
+    if (!btn) return;
+    const action = btn.getAttribute('data-bulk-action');
+    if (action !== 'keep' && action !== 'delete') return;
+
+    const selects = conflictListEl.querySelectorAll(
+      'select[data-conflict-select]'
+    );
+    for (const select of selects) {
+      const conflictId = select.getAttribute('data-conflict-select');
+      if (!conflictId) continue;
+      const hasOption = Array.from(select.options).some(
+        (opt) => opt.value === action
+      );
+      if (hasOption) {
+        select.value = action;
+        resolutions[conflictId] = { action };
+      }
+    }
+  });
+
+  // 底部操作列：「返回修改」只關閉小視窗並保留編輯面板；「確認並更新」套用變更
+  const modalFooter = document.createElement('div');
+  modalFooter.className = 'row';
+  modalFooter.style.width = '100%';
+  modalFooter.innerHTML = `
+    <button type="button" id="btnConflictBack" class="btn btn-ghost">返回修改</button>
+    <button type="button" id="btnConflictConfirm" class="btn btn-primary" style="flex:1;">確認並更新</button>
+  `;
+
+  const backBtn = modalFooter.querySelector('#btnConflictBack');
+  const confirmBtn = modalFooter.querySelector('#btnConflictConfirm');
+
+  backBtn.addEventListener('click', () => {
+    if (typeof ctx.closeModal === 'function') {
+      ctx.closeModal();
+    }
+  });
+
+  let submitted = false;
+  confirmBtn.addEventListener('click', () => {
+    if (submitted) return;
+    submitted = true;
+    onConfirm(resolutions);
+  });
+
+  ctx.openModal('確認受影響的紀錄', modalBody, modalFooter);
 }

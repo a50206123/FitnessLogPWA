@@ -1,5 +1,5 @@
 // 每次修改前端檔案都要把版本號加一
-const CACHE = 'fitness-v6';
+const CACHE = 'fitness-v7';
 
 // 需要預先快取的應用程式外殼（App Shell）資源
 const APP_SHELL = [
@@ -10,6 +10,8 @@ const APP_SHELL = [
   './calendar.js',
   './history.js',
   './equipment.js',
+  './equipment-link.js',
+  './log-editor.js',
   './share.js',
   './logic.js',
   './store.js',

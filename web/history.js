@@ -13,6 +13,7 @@ import {
   toDateStr,
 } from './logic.js';
 import { openSharePreview } from './share.js';
+import { openLogEditor } from './log-editor.js';
 
 /** 合法的歷史檢視模式清單 */
 const VALID_VIEWS = new Set(['date', 'equipment', 'part']);
@@ -369,7 +370,7 @@ export function renderHistory(container, ctx) {
     ${renderStatsBar(stats)}
     ${contentHtml}`;
 
-  // 事件委派：處理分段切換、分享今日訓練與點擊紀錄跳轉編輯
+  // 事件委派：處理分段切換、分享今日訓練與點擊紀錄開啟編輯視窗
   root.addEventListener('click', (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
@@ -401,8 +402,8 @@ export function renderHistory(container, ctx) {
     const logBtn = target.closest('.log-item[data-edit-log-id]');
     if (logBtn) {
       const editLogId = logBtn.getAttribute('data-edit-log-id');
-      if (editLogId && typeof ctx.go === 'function') {
-        ctx.go('record', { editLogId });
+      if (editLogId) {
+        openLogEditor(ctx, editLogId);
       }
     }
   });

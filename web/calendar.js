@@ -11,6 +11,7 @@ import {
   toDateStr,
 } from './logic.js';
 import { openSharePreview } from './share.js';
+import { openLogEditor } from './log-editor.js';
 
 /** 週日至週六的表頭文字（週日開始） */
 const WEEKDAY_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
@@ -181,12 +182,12 @@ function handleCalendarClick(event, ctx) {
     return;
   }
 
-  // 點擊該日訓練紀錄跳轉至記錄頁編輯
+  // 點擊該日訓練紀錄開啟編輯視窗（停留在原畫面）
   const logBtn = target.closest('.log-item[data-edit-log-id]');
   if (logBtn) {
     const editLogId = logBtn.getAttribute('data-edit-log-id');
-    if (editLogId && typeof ctx.go === 'function') {
-      ctx.go('record', { editLogId });
+    if (editLogId) {
+      openLogEditor(ctx, editLogId);
     }
     return;
   }
